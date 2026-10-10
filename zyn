@@ -1,0 +1,700 @@
+--[[
+    Zyn Admin
+]]
+
+local Players = game:GetService("Players")
+local Teams = game:GetService("Teams")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+
+local player = Players.LocalPlayer
+local CONFIGS_FILE = "ZynAdmin_configs.json"
+
+local profiles = {}
+local meta = { autoLoad = false, autoLoadName = "" }
+local preferred = "inmate"
+local autoOnDeath = true
+local ffReset = false
+local binds = { under = "None", above = "None", ret = "None" }
+
+local function snapshot()
+	return {
+		preferred = preferred,
+		autoOnDeath = autoOnDeath,
+		ffReset = ffReset,
+		binds = { under = binds.under, above = binds.above, ret = binds.ret },
+	}
+end
+
+local function applySnapshot(data)
+	if type(data) ~= "table" then return end
+	if data.preferred == "guard" or data.preferred == "inmate" then preferred = data.preferred end
+	if type(data.autoOnDeath) == "boolean" then autoOnDeath = data.autoOnDeath end
+	if type(data.ffReset) == "boolean" then ffReset = data.ffReset end
+	if type(data.binds) == "table" then
+		binds.under = data.binds.under or "None"
+		binds.above = data.binds.above or "None"
+		binds.ret = data.binds.ret or "None"
+	end
+end
+
+local function sortedNames()
+	local t = {}
+	for n in pairs(profiles) do table.insert(t, n) end
+	table.sort(t)
+	return t
+end
+
+local function saveToDisk()
+	pcall(function()
+		if not writefile then return end
+		local out = {}
+		for k, v in pairs(profiles) do out[k] = v end
+		out.__meta = meta
+		writefile(CONFIGS_FILE, HttpService:JSONEncode(out))
+	end)
+end
+
+local function loadFromDisk()
+	pcall(function()
+		if not (isfile and isfile(CONFIGS_FILE) and readfile) then return end
+		local data = HttpService:JSONDecode(readfile(CONFIGS_FILE))
+		if type(data) ~= "table" then return end
+		if type(data.__meta) == "table" then
+			meta.autoLoad = data.__meta.autoLoad == true
+			meta.autoLoadName = tostring(data.__meta.autoLoadName or "")
+		end
+		for k, v in pairs(data) do
+			if k ~= "__meta" and type(v) == "table" then profiles[k] = v end
+		end
+	end)
+end
+
+loadFromDisk()
+if meta.autoLoad and meta.autoLoadName ~= "" and profiles[meta.autoLoadName] then
+	applySnapshot(profiles[meta.autoLoadName])
+end
+
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+local Window = Rayfield:CreateWindow({
+	Name = "Zyn Admin",
+	LoadingTitle = "Zyn Admin",
+	LoadingSubtitle = "live list",
+	ConfigurationSaving = { Enabled = false },
+	KeySystem = false,
+})
+
+local AutoTab = Window:CreateTab("Automated", 4483362458)
+local TpTab = Window:CreateTab("Teleports", 4483362458)
+local BindTab = Window:CreateTab("Keybinds", 4483362458)
+local ExtrasTab = Window:CreateTab("Extras", 4483362458)
+
+local function Notify(text)
+	pcall(function()
+		Rayfield:Notify({ Title = "Zyn Admin", Content = text, Duration = 2 })
+	end)
+end
+
+local onDeathToggle, ffToggle
+local function pushToggles()
+	pcall(function() if onDeathToggle and onDeathToggle.Set then onDeathToggle:Set(autoOnDeath) end end)
+	pcall(function() if ffToggle and ffToggle.Set then ffToggle:Set(ffReset) end end)
+end
+
+local function loadProfile(name)
+	if not profiles[name] then Notify("Config not found") return end
+	applySnapshot(profiles[name])
+	pushToggles()
+	Notify("Loaded: " .. name)
+end
+
+-- team / teleports / ff
+local teamBusy, deathToken, lastDeathClock = false, 0, 0
+local DEATH_WINDOW = 8
+
+local function getRTC()
+	local r = ReplicatedStorage:FindFirstChild("Remotes")
+	if r and r:FindFirstChild("RequestTeamChange") then return r.RequestTeamChange end
+	for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+		if d.Name == "RequestTeamChange" and (d:IsA("RemoteFunction") or d:IsA("RemoteEvent")) then return d end
+	end
+end
+
+local function requestTeam(team)
+	local remote = getRTC()
+	if not remote or not team then return end
+	pcall(function()
+		if remote:IsA("RemoteFunction") then remote:InvokeServer(team, 1) else remote:FireServer(team, 1) end
+	end)
+end
+
+local function goNeutral()
+	local t = Teams:FindFirstChild("Neutral")
+	if t then requestTeam(t) end
+end
+
+local function goPreferred()
+	if preferred == "guard" then
+		local t = Teams:FindFirstChild("Guards")
+		if t then requestTeam(t) end
+	else
+		local t = Teams:FindFirstChild("Inmates")
+		if t then requestTeam(t) end
+	end
+end
+
+local function onPreferred()
+	local n = player.Team and player.Team.Name:lower() or ""
+	if preferred == "guard" then return n:find("guard") or n:find("police") end
+	return n:find("inmate") or n:find("prisoner")
+end
+
+local function isNeutral()
+	local n = player.Team and player.Team.Name:lower() or ""
+	return n:find("neutral") ~= nil
+end
+
+local function guardsFull()
+	local g = Teams:FindFirstChild("Guards")
+	return g and #g:GetPlayers() > 7
+end
+
+local function runTeamSwitch(token)
+	if teamBusy or not autoOnDeath or token ~= deathToken then return end
+	if os.clock() - lastDeathClock > DEATH_WINDOW then return end
+	teamBusy = true
+	task.spawn(function()
+		if not getRTC() then Notify("RequestTeamChange not found") teamBusy = false return end
+		for _ = 1, 6 do
+			if token ~= deathToken then break end
+			goNeutral()
+			task.wait(0.15)
+			if isNeutral() then break end
+		end
+		task.wait(0.25)
+		local tries = 0
+		while tries < 40 do
+			if token ~= deathToken or not autoOnDeath then break end
+			if os.clock() - lastDeathClock > DEATH_WINDOW then break end
+			if onPreferred() then break end
+			tries += 1
+			if preferred == "guard" and guardsFull() then task.wait(1) else goPreferred() task.wait(0.25) end
+		end
+		Notify(onPreferred() and ("Joined " .. preferred) or "Team switch failed")
+		teamBusy = false
+	end)
+end
+
+local underFloorOn, underConn, savedY, holdY, platform = false, nil, nil, nil, nil
+local OFFSET, PLATFORM_SIZE, FOOT_GAP = 7, Vector3.new(24, 1.5, 24), 3.05
+
+local function getRoot()
+	local c = player.Character
+	return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHum()
+	local c = player.Character
+	return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+local function rayParams()
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	local ex = {}
+	if player.Character then table.insert(ex, player.Character) end
+	if platform and platform.Parent then table.insert(ex, platform) end
+	rp.FilterDescendantsInstances = ex
+	return rp
+end
+
+local function saveY()
+	local root = getRoot()
+	if not root then return false end
+	savedY = root.Position.Y
+	return true
+end
+
+local function restoreYOnly()
+	local root = getRoot()
+	if not root or savedY == nil then return false end
+	local p = root.Position
+	root.CFrame = CFrame.new(p.X, savedY, p.Z) * (root.CFrame - root.CFrame.Position)
+	root.AssemblyLinearVelocity = Vector3.zero
+	return true
+end
+
+local function destroyPlatform()
+	if platform then pcall(function() platform:Destroy() end) platform = nil end
+	for _, v in ipairs(Workspace:GetChildren()) do
+		if v.Name == "ZynUnderPlatform" then pcall(function() v:Destroy() end) end
+	end
+end
+
+local function ensurePlatform(rootPos)
+	if not holdY then return end
+	local py = holdY - FOOT_GAP
+	if not platform or not platform.Parent then
+		local p = Instance.new("Part")
+		p.Name = "ZynUnderPlatform"
+		p.Anchored = true
+		p.CanCollide = true
+		p.CanQuery = false
+		p.CanTouch = false
+		p.Material = Enum.Material.SmoothPlastic
+		p.Color = Color3.fromRGB(60, 60, 70)
+		p.Transparency = 0.3
+		p.Size = PLATFORM_SIZE
+		p.CFrame = CFrame.new(rootPos.X, py, rootPos.Z)
+		p.Parent = Workspace
+		platform = p
+	else
+		platform.CFrame = CFrame.new(rootPos.X, py, rootPos.Z)
+	end
+end
+
+local function stopUnder(doRestoreY)
+	underFloorOn = false
+	if underConn then underConn:Disconnect() underConn = nil end
+	destroyPlatform()
+	if doRestoreY then restoreYOnly() end
+	holdY = nil
+end
+
+local function startUnder(y)
+	stopUnder(false)
+	holdY = y
+	underFloorOn = true
+	local root = getRoot()
+	if root then ensurePlatform(root.Position) end
+	underConn = RunService.Heartbeat:Connect(function()
+		if not underFloorOn then return end
+		local r = getRoot()
+		if not r then return end
+		r.CFrame = CFrame.new(r.Position.X, holdY, r.Position.Z) * (r.CFrame - r.CFrame.Position)
+		local v = r.AssemblyLinearVelocity
+		r.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z)
+		ensurePlatform(r.Position)
+		local hum = getHum()
+		if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
+	end)
+end
+
+local function toggleUnderFloor()
+	if underFloorOn then stopUnder(true) Notify("Under Floor OFF") return end
+	local root = getRoot()
+	if not root or not saveY() then Notify("Under Floor failed") return end
+	local hit = Workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, -80, 0), rayParams())
+	local y = hit and (hit.Position.Y - OFFSET) or (root.Position.Y - OFFSET)
+	root.CFrame = CFrame.new(root.Position.X, y, root.Position.Z)
+	root.AssemblyLinearVelocity = Vector3.zero
+	holdY = y
+	for _ = 1, 5 do ensurePlatform(root.Position) if platform then break end task.wait() end
+	startUnder(y)
+	Notify("Under Floor ON")
+end
+
+local function floorAbove()
+	if underFloorOn then stopUnder(false) end
+	local root = getRoot()
+	if not root or not saveY() then return end
+	local hit = Workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, 100, 0), rayParams())
+	local y = (not hit) and (root.Position.Y + OFFSET) or (hit.Position.Y + OFFSET)
+	if hit and hit.Position.Y <= root.Position.Y + 0.5 then Notify("No higher surface") return end
+	root.CFrame = CFrame.new(root.Position.X, y, root.Position.Z)
+	root.AssemblyLinearVelocity = Vector3.zero
+	Notify("Floor above")
+end
+
+local function returnPos()
+	if underFloorOn then stopUnder(true) else restoreYOnly() destroyPlatform() end
+	Notify("Returned")
+end
+
+local ffConns = {}
+local function clearFfConns()
+	for _, c in ipairs(ffConns) do pcall(function() c:Disconnect() end) end
+	table.clear(ffConns)
+end
+
+local function doResetFromFF()
+	if not ffReset then return end
+	local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+	if hum and hum.Health > 0 then hum.Health = 0 end
+end
+
+local function watchForceField(ff, char)
+	if not ff or not ff:IsA("ForceField") then return end
+	table.insert(ffConns, ff.Destroying:Connect(function() task.defer(doResetFromFF) end))
+	table.insert(ffConns, ff.AncestryChanged:Connect(function()
+		if not ff:IsDescendantOf(char) then task.defer(doResetFromFF) end
+	end))
+end
+
+local function hookForceField(char)
+	local existing = char:FindFirstChildOfClass("ForceField")
+	if existing then watchForceField(existing, char) end
+	table.insert(ffConns, char.ChildAdded:Connect(function(child)
+		if child:IsA("ForceField") then watchForceField(child, char) end
+	end))
+	table.insert(ffConns, char.ChildRemoved:Connect(function(child)
+		if child:IsA("ForceField") then task.defer(doResetFromFF) end
+	end))
+end
+
+-- ===== FLING + PGUI=====
+local flingOn, flingConn, flingTarget = false, nil, nil
+
+local function hasNetOwner(part)
+	if typeof(isnetworkowner) == "function" then
+		local ok, r = pcall(isnetworkowner, part)
+		return ok and r == true
+	end
+	local ok, owner = pcall(function() return part:GetNetworkOwner() end)
+	return ok and owner == player
+end
+
+local function getPlrRoot(plr)
+	local c = plr and plr.Character
+	if not c then return end
+	local h, r = c:FindFirstChildOfClass("Humanoid"), c:FindFirstChild("HumanoidRootPart")
+	if r and h and h.Health > 0 then return r end
+end
+
+local function applySeat(seat, targetRoot)
+	seat.AssemblyLinearVelocity = Vector3.new(10000, 10000, 0)
+	seat.CFrame = CFrame.new(targetRoot.Position) * CFrame.new(-2, 0, -12)
+	pcall(function() sethiddenproperty(seat, "PhysicsRepRootPart", targetRoot) end)
+	pcall(function()
+		if InstanceHandle then sethiddenproperty(seat, "PhysicsRepRootRef", InstanceHandle.new(targetRoot)) end
+	end)
+	local model = seat.Parent and seat.Parent.Parent
+	if model then
+		local w = model:FindFirstChild("Wheels")
+		if w then pcall(function() w:Destroy() end) end
+	end
+end
+
+local function stopFling()
+	flingOn = false
+	if flingConn then flingConn:Disconnect() flingConn = nil end
+end
+
+local function startFling()
+	if not flingTarget or not flingTarget.Parent then
+		Notify("Select a player first")
+		return false
+	end
+	stopFling()
+	flingOn = true
+	flingConn = RunService.Heartbeat:Connect(function()
+		if not flingOn or not flingTarget then return end
+		local tRoot = getPlrRoot(flingTarget)
+		if not tRoot then return end
+		local container = Workspace:FindFirstChild("CarContainer")
+		if not container then return end
+		for _, seat in ipairs(container:GetDescendants()) do
+			if seat:IsA("VehicleSeat") and hasNetOwner(seat) then
+				applySeat(seat, tRoot)
+			end
+		end
+	end)
+	Notify("Fling ON → " .. flingTarget.Name)
+	return true
+end
+
+-- PlayerGui
+pcall(function()
+	local old = CoreGui:FindFirstChild("PlayerList")
+	if old then old:Destroy() end
+	local pg = player:FindFirstChild("PlayerGui")
+	if pg then
+		local o2 = pg:FindFirstChild("PlayerList")
+		if o2 then o2:Destroy() end
+	end
+end)
+
+local ListGui = Instance.new("ScreenGui")
+ListGui.Name = "PlayerList"
+ListGui.ResetOnSpawn = false
+pcall(function() ListGui.Parent = CoreGui:FindFirstChild("RobloxGui") or CoreGui end)
+if not ListGui.Parent then ListGui.Parent = player:WaitForChild("PlayerGui") end
+
+local ListFrame = Instance.new("Frame")
+ListFrame.Size = UDim2.new(0, 240, 0, 300)
+ListFrame.Position = UDim2.new(0, 16, 0.3, 0)
+ListFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+ListFrame.BorderSizePixel = 0
+ListFrame.Active = true
+ListFrame.Draggable = true
+ListFrame.Visible = false
+ListFrame.Parent = ListGui
+Instance.new("UICorner", ListFrame).CornerRadius = UDim.new(0, 8)
+
+local ListTitle = Instance.new("TextLabel")
+ListTitle.Size = UDim2.new(1, -40, 0, 26)
+ListTitle.Position = UDim2.new(0, 8, 0, 4)
+ListTitle.BackgroundTransparency = 1
+ListTitle.Text = "Players (live)"
+ListTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+ListTitle.Font = Enum.Font.GothamBold
+ListTitle.TextSize = 13
+ListTitle.TextXAlignment = Enum.TextXAlignment.Left
+ListTitle.Parent = ListFrame
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 26, 0, 26)
+CloseBtn.Position = UDim2.new(1, -30, 0, 4)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(70, 40, 40)
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 12
+CloseBtn.Parent = ListFrame
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
+CloseBtn.MouseButton1Click:Connect(function() ListFrame.Visible = false end)
+
+local SelectedLbl = Instance.new("TextLabel")
+SelectedLbl.Size = UDim2.new(1, -16, 0, 20)
+SelectedLbl.Position = UDim2.new(0, 8, 0, 30)
+SelectedLbl.BackgroundTransparency = 1
+SelectedLbl.Text = "Selected: (none)"
+SelectedLbl.TextColor3 = Color3.fromRGB(140, 200, 140)
+SelectedLbl.Font = Enum.Font.Gotham
+SelectedLbl.TextSize = 11
+SelectedLbl.TextXAlignment = Enum.TextXAlignment.Left
+SelectedLbl.Parent = ListFrame
+
+local Scroll = Instance.new("ScrollingFrame")
+Scroll.Size = UDim2.new(1, -16, 1, -100)
+Scroll.Position = UDim2.new(0, 8, 0, 52)
+Scroll.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+Scroll.BorderSizePixel = 0
+Scroll.ScrollBarThickness = 4
+Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+Scroll.Parent = ListFrame
+Instance.new("UICorner", Scroll).CornerRadius = UDim.new(0, 6)
+local lay = Instance.new("UIListLayout")
+lay.Parent = Scroll
+lay.Padding = UDim.new(0, 4)
+lay.SortOrder = Enum.SortOrder.Name
+
+local StartBtn = Instance.new("TextButton")
+StartBtn.Size = UDim2.new(0.48, -6, 0, 30)
+StartBtn.Position = UDim2.new(0, 8, 1, -38)
+StartBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 60)
+StartBtn.Text = "Start"
+StartBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+StartBtn.Font = Enum.Font.GothamBold
+StartBtn.TextSize = 12
+StartBtn.Parent = ListFrame
+Instance.new("UICorner", StartBtn).CornerRadius = UDim.new(0, 6)
+
+local StopBtn = Instance.new("TextButton")
+StopBtn.Size = UDim2.new(0.48, -6, 0, 30)
+StopBtn.Position = UDim2.new(0.52, 0, 1, -38)
+StopBtn.BackgroundColor3 = Color3.fromRGB(160, 50, 50)
+StopBtn.Text = "Stop"
+StopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+StopBtn.Font = Enum.Font.GothamBold
+StopBtn.TextSize = 12
+StopBtn.Parent = ListFrame
+Instance.new("UICorner", StopBtn).CornerRadius = UDim.new(0, 6)
+
+local function rebuildPlayerList()
+	for _, c in ipairs(Scroll:GetChildren()) do
+		if c:IsA("TextButton") then c:Destroy() end
+	end
+	if flingTarget and not flingTarget.Parent then
+		flingTarget = nil
+		stopFling()
+	end
+	local list = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= player then table.insert(list, p) end
+	end
+	table.sort(list, function(a, b) return a.Name:lower() < b.Name:lower() end)
+	for _, p in ipairs(list) do
+		local b = Instance.new("TextButton")
+		b.Name = p.Name
+		b.Size = UDim2.new(1, -8, 0, 28)
+		b.BackgroundColor3 = (flingTarget == p) and Color3.fromRGB(40, 90, 50) or Color3.fromRGB(48, 48, 56)
+		b.Text = p.DisplayName .. "  (@" .. p.Name .. ")"
+		b.TextColor3 = Color3.fromRGB(255, 255, 255)
+		b.Font = Enum.Font.Gotham
+		b.TextSize = 12
+		b.Parent = Scroll
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+		b.MouseButton1Click:Connect(function()
+			flingTarget = p
+			SelectedLbl.Text = "Selected: " .. p.DisplayName .. " (@" .. p.Name .. ")"
+			rebuildPlayerList()
+		end)
+	end
+	if flingTarget and flingTarget.Parent then
+		SelectedLbl.Text = "Selected: " .. flingTarget.DisplayName .. " (@" .. flingTarget.Name .. ")"
+	else
+		SelectedLbl.Text = "Selected: (none)"
+	end
+end
+
+StartBtn.MouseButton1Click:Connect(function()
+	if flingOn then
+		stopFling()
+		StartBtn.Text = "Start"
+		StartBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 60)
+	elseif startFling() then
+		StartBtn.Text = "Running"
+		StartBtn.BackgroundColor3 = Color3.fromRGB(180, 120, 40)
+	end
+end)
+
+StopBtn.MouseButton1Click:Connect(function()
+	stopFling()
+	StartBtn.Text = "Start"
+	StartBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 60)
+	Notify("Fling stopped")
+end)
+
+-- THIS is what keeps the list updated
+Players.PlayerAdded:Connect(function()
+	task.defer(rebuildPlayerList)
+end)
+Players.PlayerRemoving:Connect(function(p)
+	if p == flingTarget then
+		flingTarget = nil
+		stopFling()
+		StartBtn.Text = "Start"
+		StartBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 60)
+	end
+	task.defer(rebuildPlayerList)
+end)
+
+rebuildPlayerList()
+
+-- UI tabs
+AutoTab:CreateSection("Team on Death")
+AutoTab:CreateDropdown({
+	Name = "Preferred Team",
+	Options = { "Prisoner", "Guard" },
+	CurrentOption = { preferred == "guard" and "Guard" or "Prisoner" },
+	MultipleOptions = false,
+	Callback = function(opt)
+		local v = type(opt) == "table" and opt[1] or opt
+		preferred = tostring(v):lower():find("guard") and "guard" or "inmate"
+	end,
+})
+onDeathToggle = AutoTab:CreateToggle({
+	Name = "On Death",
+	CurrentValue = autoOnDeath,
+	Callback = function(v) autoOnDeath = v end,
+})
+
+TpTab:CreateSection("Floor")
+TpTab:CreateToggle({
+	Name = "Under",
+	CurrentValue = false,
+	Callback = function(v) if v ~= underFloorOn then toggleUnderFloor() end end,
+})
+TpTab:CreateButton({ Name = "Above", Callback = floorAbove })
+TpTab:CreateButton({ Name = "Return", Callback = returnPos })
+
+BindTab:CreateSection("Binds")
+BindTab:CreateKeybind({
+	Name = "Under", CurrentKeybind = binds.under, HoldToInteract = false,
+	Callback = toggleUnderFloor,
+	ChangedCallback = function(key) binds.under = key or "None" end,
+})
+BindTab:CreateKeybind({
+	Name = "Above", CurrentKeybind = binds.above, HoldToInteract = false,
+	Callback = floorAbove,
+	ChangedCallback = function(key) binds.above = key or "None" end,
+})
+BindTab:CreateKeybind({
+	Name = "Return", CurrentKeybind = binds.ret, HoldToInteract = false,
+	Callback = returnPos,
+	ChangedCallback = function(key) binds.ret = key or "None" end,
+})
+
+ExtrasTab:CreateSection("ForceField")
+ffToggle = ExtrasTab:CreateToggle({
+	Name = "Reset when ForceField wears off",
+	CurrentValue = ffReset,
+	Callback = function(v) ffReset = v end,
+})
+
+ExtrasTab:CreateSection("Owned seat fling")
+ExtrasTab:CreateButton({
+	Name = "Open player list",
+	Callback = function()
+		ListFrame.Visible = true
+		rebuildPlayerList()
+	end,
+})
+ExtrasTab:CreateButton({
+	Name = "Close player list",
+	Callback = function() ListFrame.Visible = false end,
+})
+
+ExtrasTab:CreateSection("Configs")
+local typedName = ""
+ExtrasTab:CreateInput({
+	Name = "Config name",
+	PlaceholderText = "name",
+	CurrentValue = "",
+	Callback = function(t) typedName = tostring(t or ""):gsub("^%s+", ""):gsub("%s+$", "") end,
+})
+ExtrasTab:CreateButton({
+	Name = "Create config",
+	Callback = function()
+		if typedName == "" then Notify("Type a name") return end
+		profiles[typedName] = snapshot()
+		saveToDisk()
+		Notify("Saved " .. typedName)
+	end,
+})
+for _, name in ipairs(sortedNames()) do
+	local cfg = name
+	ExtrasTab:CreateButton({ Name = "Load: " .. cfg, Callback = function() loadProfile(cfg) end })
+end
+ExtrasTab:CreateToggle({
+	Name = "Auto-load enabled",
+	CurrentValue = meta.autoLoad,
+	Callback = function(v) meta.autoLoad = v saveToDisk() end,
+})
+for _, name in ipairs(sortedNames()) do
+	local cfg = name
+	ExtrasTab:CreateButton({
+		Name = "Auto-load: " .. cfg,
+		Callback = function() meta.autoLoadName = cfg saveToDisk() Notify("Auto-load " .. cfg) end,
+	})
+end
+
+local function hook(char)
+	local hum = char:WaitForChild("Humanoid", 10)
+	if not hum then return end
+	hum.Died:Connect(function()
+		if not autoOnDeath then return end
+		deathToken += 1
+		local token = deathToken
+		lastDeathClock = os.clock()
+		task.delay(0.35, function()
+			if token == deathToken then runTeamSwitch(token) end
+		end)
+	end)
+	clearFfConns()
+	hookForceField(char)
+end
+
+if player.Character then hook(player.Character) end
+player.CharacterAdded:Connect(function(char)
+	hook(char)
+	if underFloorOn then stopUnder(false) end
+end)
+
+Notify("Zyn Admin loaded")
+print("Zyn Admin")
