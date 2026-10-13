@@ -1,7 +1,8 @@
 --[[
-    Lithium Battery- Rayfield Gen2
+    Lithium Battery - Rayfield Gen2
     Same features • Navy accent • Floor Tools + Keybinds + Fling
     Player list with avatars + team
+    + Auto-refreshing player list + ESP in Visual tab
 ]]
 local Players = game:GetService("Players")
 local Teams = game:GetService("Teams")
@@ -75,7 +76,7 @@ local function runTeamSwitch(token)
 	teamBusy = true
 	task.spawn(function()
 		if not getRTC() then
-			window:Notify({ title = "Zyn", content = "RequestTeamChange not found" })
+			window:Notify({ title = "Lithium Battery", content = "RequestTeamChange not found" })
 			teamBusy = false
 			return
 		end
@@ -94,7 +95,7 @@ local function runTeamSwitch(token)
 			tries += 1
 			if preferred == "guard" and guardsFull() then task.wait(1) else goPreferred() task.wait(0.25) end
 		end
-		window:Notify({ title = "Zyn", content = onPreferred() and ("Joined " .. preferred) or "Team switch failed" })
+		window:Notify({ title = "Lithium Battery", content = onPreferred() and ("Joined " .. preferred) or "Team switch failed" })
 		teamBusy = false
 	end)
 end
@@ -144,7 +145,7 @@ end
 local function destroyPlatform()
 	if platform then pcall(function() platform:Destroy() end) platform = nil end
 	for _, v in ipairs(Workspace:GetChildren()) do
-		if v.Name == "ZynUnderPlatform" then pcall(function() v:Destroy() end) end
+		if v.Name == "UnderPlatform" then pcall(function() v:Destroy() end) end
 	end
 end
 
@@ -153,7 +154,7 @@ local function ensurePlatform(rootPos)
 	local py = holdY - FOOT_GAP
 	if not platform or not platform.Parent then
 		local p = Instance.new("Part")
-		p.Name = "ZynUnderPlatform"
+		p.Name = "UnderPlatform"
 		p.Anchored = true
 		p.CanCollide = true
 		p.CanQuery = false
@@ -200,12 +201,12 @@ end
 local function toggleUnderFloor()
 	if underFloorOn then
 		stopUnder(true)
-		window:Notify({ title = "Zyn", content = "Under Floor OFF" })
+		window:Notify({ title = "Lithium Battery", content = "Under Floor OFF" })
 		return
 	end
 	local root = getRoot()
 	if not root or not saveY() then
-		window:Notify({ title = "Zyn", content = "Under Floor failed" })
+		window:Notify({ title = "Lithium Battery", content = "Under Floor failed" })
 		return
 	end
 	local hit = Workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, -80, 0), rayParams())
@@ -215,30 +216,30 @@ local function toggleUnderFloor()
 	holdY = y
 	for _ = 1, 5 do ensurePlatform(root.Position) if platform then break end task.wait() end
 	startUnder(y)
-	window:Notify({ title = "Zyn", content = "Under Floor ON (" .. underOffset .. " studs)" })
+	window:Notify({ title = "Lithium Battery", content = "Under Floor ON (" .. underOffset .. " studs)" })
 end
 
 local function floorAbove()
 	if underFloorOn then stopUnder(false) end
 	local root = getRoot()
 	if not root or not saveY() then
-		window:Notify({ title = "Zyn", content = "Above failed" })
+		window:Notify({ title = "Lithium Battery", content = "Above failed" })
 		return
 	end
 	local hit = Workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, 100, 0), rayParams())
 	local y = (not hit) and (root.Position.Y + aboveOffset) or (hit.Position.Y + aboveOffset)
 	if hit and hit.Position.Y <= root.Position.Y + 0.5 then
-		window:Notify({ title = "Zyn", content = "No higher surface" })
+		window:Notify({ title = "Lithium Battery", content = "No higher surface" })
 		return
 	end
 	root.CFrame = CFrame.new(root.Position.X, y, root.Position.Z)
 	root.AssemblyLinearVelocity = Vector3.zero
-	window:Notify({ title = "Zyn", content = "Floor Above (" .. aboveOffset .. " studs)" })
+	window:Notify({ title = "Lithium Battery", content = "Floor Above (" .. aboveOffset .. " studs)" })
 end
 
 local function returnPos()
 	if underFloorOn then stopUnder(true) else restoreYOnly() destroyPlatform() end
-	window:Notify({ title = "Zyn", content = "Returned" })
+	window:Notify({ title = "Lithium Battery", content = "Returned" })
 end
 
 -- ========== FORCEFIELD ==========
@@ -314,7 +315,7 @@ end
 local function startFling()
 	if not flingTarget or not flingTarget.Parent then
 		if window then
-			window:Notify({ title = "Zyn", content = "Select a player first" })
+			window:Notify({ title = "Lithium Battery", content = "Select a player first" })
 		end
 		return false
 	end
@@ -333,7 +334,7 @@ local function startFling()
 		end
 	end)
 	if window then
-		window:Notify({ title = "Zyn", content = "Fling ON → " .. flingTarget.Name })
+		window:Notify({ title = "Lithium Battery", content = "Fling ON → " .. flingTarget.Name })
 	end
 	return true
 end
@@ -350,6 +351,8 @@ local ACCENT = Color3.fromRGB(80, 100, 220)
 local playerListGui = nil
 local selectedRow = nil
 local selectedLabel = nil
+local playerRows = {}   -- [player] = { row, nameLbl, userLbl, teamBadge, avatar }
+local refreshConn = nil
 
 local function getTeamName(plr)
 	if plr.Team then return plr.Team.Name end
@@ -364,6 +367,8 @@ local function getTeamColor(plr)
 end
 
 local function closePlayerList()
+	if refreshConn then refreshConn:Disconnect() refreshConn = nil end
+	table.clear(playerRows)
 	if playerListGui then
 		playerListGui:Destroy()
 		playerListGui = nil
@@ -371,11 +376,36 @@ local function closePlayerList()
 	end
 end
 
+local function updateRow(plr, data)
+	if not (data and data.row and data.row.Parent) then return end
+	local teamName = getTeamName(plr)
+	if data.teamBadge then
+		data.teamBadge.Text = teamName
+		data.teamBadge.BackgroundColor3 = getTeamColor(plr)
+	end
+	if data.nameLbl and data.nameLbl.Text ~= plr.DisplayName then
+		data.nameLbl.Text = plr.DisplayName
+	end
+	if data.userLbl and data.userLbl.Text ~= ("@" .. plr.Name) then
+		data.userLbl.Text = "@" .. plr.Name
+	end
+	if data.avatar then
+		local newImg = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48", plr.UserId)
+		if data.avatar.Image ~= newImg then data.avatar.Image = newImg end
+	end
+	-- reflect current selection highlight
+	if flingTarget == plr and data.row.BackgroundColor3 ~= NAVY_LIGHT then
+		data.row.BackgroundColor3 = NAVY_LIGHT
+	elseif flingTarget ~= plr and data.row.BackgroundColor3 ~= NAVY_DARK then
+		data.row.BackgroundColor3 = NAVY_DARK
+	end
+end
+
 local function buildPlayerList()
 	closePlayerList()
 
 	local sg = Instance.new("ScreenGui")
-	sg.Name = "ZynPlayerList"
+	sg.Name = "PlayerList"
 	sg.ResetOnSpawn = false
 	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	sg.DisplayOrder = 100
@@ -488,7 +518,7 @@ local function buildPlayerList()
 			selectedLabel.TextColor3 = WHITE
 		end
 		if window then
-			window:Notify({ title = "Zyn", content = "Selected: " .. plr.DisplayName })
+			window:Notify({ title = "Lithium Battery", content = "Selected: " .. plr.DisplayName })
 		end
 	end
 
@@ -560,6 +590,14 @@ local function buildPlayerList()
 		row.MouseButton1Click:Connect(function()
 			selectPlayer(plr, row)
 		end)
+
+		playerRows[plr] = {
+			row = row,
+			nameLbl = nameLbl,
+			userLbl = userLbl,
+			teamBadge = teamBadge,
+			avatar = avatar,
+		}
 	end
 
 	-- Bottom buttons
@@ -585,7 +623,7 @@ local function buildPlayerList()
 		if flingOn then
 			stopFling()
 			flingBtn.Text = "Fling"
-			if window then window:Notify({ title = "Zyn", content = "Fling stopped" }) end
+			if window then window:Notify({ title = "Lithium Battery", content = "Fling stopped" }) end
 		else
 			if startFling() then
 				flingBtn.Text = "Stop Fling"
@@ -629,14 +667,241 @@ local function buildPlayerList()
 			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 		end
 	end)
+
+	-- ===== AUTO REFRESH (live, no rebuild) =====
+	-- Runs on Heartbeat but throttled to avoid destroying/recreating GUI every frame.
+	-- It updates names, teams, avatars, and selection highlight in place.
+	local lastRefresh = 0
+	refreshConn = RunService.Heartbeat:Connect(function()
+		if not playerListGui or not playerListGui.Parent then
+			if refreshConn then refreshConn:Disconnect() refreshConn = nil end
+			return
+		end
+		local now = os.clock()
+		if now - lastRefresh < 0.1 then return end -- ~10 updates/sec, smooth & safe
+		lastRefresh = now
+
+		-- Update existing rows
+		for plr, data in pairs(playerRows) do
+			if not plr.Parent then
+				if data.row and data.row.Parent then data.row:Destroy() end
+				playerRows[plr] = nil
+			else
+				updateRow(plr, data)
+			end
+		end
+
+		-- Add new players that joined after the list opened
+		local listed = {}
+		for plr in pairs(playerRows) do listed[plr] = true end
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= player and not listed[plr] then
+				-- Rebuild the whole list once so the new player appears in the right slot
+				buildPlayerList()
+				return
+			end
+		end
+
+		-- Update "Selected" label if it was cleared by target leaving
+		if selectedLabel then
+			if flingTarget and flingTarget.Parent then
+				selectedLabel.Text = "Selected: " .. flingTarget.DisplayName
+				selectedLabel.TextColor3 = WHITE
+			else
+				selectedLabel.Text = "Selected: none"
+				selectedLabel.TextColor3 = MUTED
+			end
+		end
+	end)
 end
+
+-- ========== ESP (from esp.txt) ==========
+local ESP = {}
+local espEnabled = false
+local espConn = nil
+local ESP_Camera = Workspace.CurrentCamera
+
+local function espGetTeamColor(Player)
+	if Player.Team then
+		return Player.Team.TeamColor.Color
+	end
+	return Color3.new(1, 1, 1)
+end
+
+local function espIsVisible(Character)
+	local Head = Character:FindFirstChild("Head")
+	if not Head then return false end
+	local origin = ESP_Camera.CFrame.Position
+	local target = Head.Position
+	local direction = target - origin
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = {player.Character, Character}
+	params.IgnoreWater = true
+	local result = Workspace:Raycast(origin, direction, params)
+	if not result then
+		return true
+	end
+	return result.Instance:IsDescendantOf(Character)
+end
+
+local function CreateESP(Player)
+	if Player == player then return end
+	if ESP[Player] then return end
+
+	local Outline = Instance.new("Highlight")
+	Outline.Name = "ESP_Outline"
+	Outline.FillTransparency = 1
+	Outline.OutlineTransparency = 0
+	Outline.OutlineColor = Color3.new(1, 1, 1)
+	Outline.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	Outline.Enabled = false
+
+	local HealthBG = Drawing.new("Square")
+	HealthBG.Thickness = 1
+	HealthBG.Filled = true
+	HealthBG.Color = Color3.new(0, 0, 0)
+	HealthBG.Visible = false
+
+	local HealthBar = Drawing.new("Square")
+	HealthBar.Thickness = 1
+	HealthBar.Filled = true
+	HealthBar.Visible = false
+
+	local NameTag = Drawing.new("Text")
+	NameTag.Size = 14
+	NameTag.Center = true
+	NameTag.Outline = true
+	NameTag.OutlineColor = Color3.new(0, 0, 0)
+	NameTag.Visible = false
+
+	ESP[Player] = {
+		Outline = Outline,
+		HealthBG = HealthBG,
+		HealthBar = HealthBar,
+		NameTag = NameTag
+	}
+end
+
+local function RemoveESP(Player)
+	local data = ESP[Player]
+	if data then
+		if data.Outline then
+			data.Outline:Destroy()
+		end
+		data.HealthBG:Remove()
+		data.HealthBar:Remove()
+		data.NameTag:Remove()
+		ESP[Player] = nil
+	end
+end
+
+local function HideESP(data)
+	data.Outline.Enabled = false
+	data.HealthBG.Visible = false
+	data.HealthBar.Visible = false
+	data.NameTag.Visible = false
+end
+
+local function UpdateESP()
+	for Player, data in pairs(ESP) do
+		local Character = Player.Character
+		local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+		local RootPart = Character and Character:FindFirstChild("HumanoidRootPart")
+		local Head = Character and Character:FindFirstChild("Head")
+
+		if not (Character and Humanoid and RootPart and Head) then
+			HideESP(data)
+			continue
+		end
+
+		if espIsVisible(Character) then
+			HideESP(data)
+			continue
+		end
+
+		if data.Outline.Parent ~= Character then
+			data.Outline.Parent = Character
+		end
+
+		local topPos, topOnScreen = ESP_Camera:WorldToViewportPoint(Head.Position + Vector3.new(0, 0.5, 0))
+		local bottomPos = ESP_Camera:WorldToViewportPoint(RootPart.Position - Vector3.new(0, 3, 0))
+
+		if not topOnScreen then
+			HideESP(data)
+			continue
+		end
+
+		local height = math.abs(topPos.Y - bottomPos.Y)
+		local width = height / 2
+		local boxX = topPos.X - width / 2
+		local boxY = topPos.Y
+		local color = espGetTeamColor(Player)
+
+		data.Outline.OutlineColor = color
+		data.Outline.Enabled = true
+
+		local healthPercent = math.clamp(Humanoid.Health / Humanoid.MaxHealth, 0, 1)
+		local barWidth = 4
+		local barHeight = height * healthPercent
+
+		data.HealthBG.Size = Vector2.new(barWidth, height)
+		data.HealthBG.Position = Vector2.new(boxX - barWidth - 3, boxY)
+		data.HealthBG.Visible = true
+
+		data.HealthBar.Size = Vector2.new(barWidth, barHeight)
+		data.HealthBar.Position = Vector2.new(boxX - barWidth - 3, boxY + (height - barHeight))
+		data.HealthBar.Color = Color3.fromRGB(
+			255 - (healthPercent * 255),
+			healthPercent * 255,
+			0
+		)
+		data.HealthBar.Visible = true
+
+		local distance = math.floor((RootPart.Position - ESP_Camera.CFrame.Position).Magnitude)
+		data.NameTag.Text = string.format("%s [%dm]", Player.Name, distance)
+		data.NameTag.Color = color
+		data.NameTag.Position = Vector2.new(topPos.X, boxY - 16)
+		data.NameTag.Visible = true
+	end
+end
+
+local function startESP()
+	if espConn then return end
+	for _, p in ipairs(Players:GetPlayers()) do
+		CreateESP(p)
+	end
+	espConn = RunService.RenderStepped:Connect(UpdateESP)
+end
+
+local function stopESP()
+	if espConn then
+		espConn:Disconnect()
+		espConn = nil
+	end
+	for Player, _ in pairs(ESP) do
+		RemoveESP(Player)
+	end
+end
+
+Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+	ESP_Camera = Workspace.CurrentCamera
+end)
+
+Players.PlayerAdded:Connect(function(p)
+	if espEnabled then CreateESP(p) end
+end)
+
+Players.PlayerRemoving:Connect(function(p)
+	RemoveESP(p)
+end)
 
 -- ========== RAYFIELD GEN2 ==========
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
 
 local window = Rayfield:CreateWindow({
-	name = "Zyn Admin",
-	subtitle = "Rayfield Gen2",
+	name = "Lithium Battery",
+	subtitle = "By Zynn",
 	sidebarLayout = true,
 	theme = {
 		TabColor = Color3.fromRGB(200, 200, 220),
@@ -648,7 +913,7 @@ local window = Rayfield:CreateWindow({
 	configuration = {
 		autoSave = true,
 		autoLoad = true,
-		fileName = "ZynAdmin",
+		fileName = "LithiumBattery",
 	},
 })
 
@@ -662,10 +927,24 @@ combatTab:CreateText({
 
 -- ========== VISUAL TAB ==========
 local visualTab = window:CreateTab({ name = "Visual", icon = 84750991656135 })
-visualTab:CreateSection({ name = "Visual" })
+visualTab:CreateSection({ name = "ESP" })
+visualTab:CreateToggle({
+	name = "Enable ESP",
+	value = espEnabled,
+	callback = function(v)
+		espEnabled = v
+		if v then
+			startESP()
+			window:Notify({ title = "Lithium Battery", content = "ESP ON" })
+		else
+			stopESP()
+			window:Notify({ title = "Lithium Battery", content = "ESP OFF" })
+		end
+	end,
+})
 visualTab:CreateText({
-	name = "No visual features",
-	text = "Placeholder for future ESP / visual tools.",
+	name = "ESP info",
+	text = "Shows players through walls (Highlight + health bar + name/distance). Team-colored.",
 })
 
 -- ========== PLAYER TAB (Floor Tools) ==========
@@ -699,7 +978,7 @@ playerTab:CreateKeybind({
 	end,
 	onChanged = function(key)
 		binds.under = key and key.Name or "None"
-		window:Notify({ title = "Zyn", content = "Under Floor bound to " .. binds.under })
+		window:Notify({ title = "Lithium Battery", content = "Under Floor bound to " .. binds.under })
 	end,
 })
 playerTab:CreateKeybind({
@@ -710,7 +989,7 @@ playerTab:CreateKeybind({
 	end,
 	onChanged = function(key)
 		binds.above = key and key.Name or "None"
-		window:Notify({ title = "Zyn", content = "Above bound to " .. binds.above })
+		window:Notify({ title = "Lithium Battery", content = "Above bound to " .. binds.above })
 	end,
 })
 playerTab:CreateKeybind({
@@ -721,7 +1000,7 @@ playerTab:CreateKeybind({
 	end,
 	onChanged = function(key)
 		binds.ret = key and key.Name or "None"
-		window:Notify({ title = "Zyn", content = "Return bound to " .. binds.ret })
+		window:Notify({ title = "Lithium Battery", content = "Return bound to " .. binds.ret })
 	end,
 })
 
@@ -768,7 +1047,7 @@ extrasTab:CreateButton({
 	name = "Stop Fling",
 	callback = function()
 		stopFling()
-		window:Notify({ title = "Zyn", content = "Fling stopped" })
+		window:Notify({ title = "Lithium Battery", content = "Fling stopped" })
 	end,
 })
 
