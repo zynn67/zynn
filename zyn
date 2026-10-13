@@ -1,117 +1,24 @@
 --[[
-    Zyn Admin
+    Lithium Battery- Rayfield Gen2
+    Same features • Navy accent • Floor Tools + Keybinds + Fling
+    Player list with avatars + team
 ]]
-
 local Players = game:GetService("Players")
 local Teams = game:GetService("Teams")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
-local HttpService = game:GetService("HttpService")
-local CoreGui = game:GetService("CoreGui")
-
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 local player = Players.LocalPlayer
-local CONFIGS_FILE = "ZynAdmin_configs.json"
 
-local profiles = {}
-local meta = { autoLoad = false, autoLoadName = "" }
+-- ========== CONFIG ==========
 local preferred = "inmate"
 local autoOnDeath = true
 local ffReset = false
 local binds = { under = "None", above = "None", ret = "None" }
 
-local function snapshot()
-	return {
-		preferred = preferred,
-		autoOnDeath = autoOnDeath,
-		ffReset = ffReset,
-		binds = { under = binds.under, above = binds.above, ret = binds.ret },
-	}
-end
-
-local function applySnapshot(data)
-	if type(data) ~= "table" then return end
-	if data.preferred == "guard" or data.preferred == "inmate" then preferred = data.preferred end
-	if type(data.autoOnDeath) == "boolean" then autoOnDeath = data.autoOnDeath end
-	if type(data.ffReset) == "boolean" then ffReset = data.ffReset end
-	if type(data.binds) == "table" then
-		binds.under = data.binds.under or "None"
-		binds.above = data.binds.above or "None"
-		binds.ret = data.binds.ret or "None"
-	end
-end
-
-local function sortedNames()
-	local t = {}
-	for n in pairs(profiles) do table.insert(t, n) end
-	table.sort(t)
-	return t
-end
-
-local function saveToDisk()
-	pcall(function()
-		if not writefile then return end
-		local out = {}
-		for k, v in pairs(profiles) do out[k] = v end
-		out.__meta = meta
-		writefile(CONFIGS_FILE, HttpService:JSONEncode(out))
-	end)
-end
-
-local function loadFromDisk()
-	pcall(function()
-		if not (isfile and isfile(CONFIGS_FILE) and readfile) then return end
-		local data = HttpService:JSONDecode(readfile(CONFIGS_FILE))
-		if type(data) ~= "table" then return end
-		if type(data.__meta) == "table" then
-			meta.autoLoad = data.__meta.autoLoad == true
-			meta.autoLoadName = tostring(data.__meta.autoLoadName or "")
-		end
-		for k, v in pairs(data) do
-			if k ~= "__meta" and type(v) == "table" then profiles[k] = v end
-		end
-	end)
-end
-
-loadFromDisk()
-if meta.autoLoad and meta.autoLoadName ~= "" and profiles[meta.autoLoadName] then
-	applySnapshot(profiles[meta.autoLoadName])
-end
-
-local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
-local Window = Rayfield:CreateWindow({
-	Name = "Zyn Admin",
-	LoadingTitle = "Zyn Admin",
-	LoadingSubtitle = "live list",
-	ConfigurationSaving = { Enabled = false },
-	KeySystem = false,
-})
-
-local AutoTab = Window:CreateTab("Automated", 4483362458)
-local TpTab = Window:CreateTab("Teleports", 4483362458)
-local BindTab = Window:CreateTab("Keybinds", 4483362458)
-local ExtrasTab = Window:CreateTab("Extras", 4483362458)
-
-local function Notify(text)
-	pcall(function()
-		Rayfield:Notify({ Title = "Zyn Admin", Content = text, Duration = 2 })
-	end)
-end
-
-local onDeathToggle, ffToggle
-local function pushToggles()
-	pcall(function() if onDeathToggle and onDeathToggle.Set then onDeathToggle:Set(autoOnDeath) end end)
-	pcall(function() if ffToggle and ffToggle.Set then ffToggle:Set(ffReset) end end)
-end
-
-local function loadProfile(name)
-	if not profiles[name] then Notify("Config not found") return end
-	applySnapshot(profiles[name])
-	pushToggles()
-	Notify("Loaded: " .. name)
-end
-
--- team / teleports / ff
+-- ========== TEAM LOGIC ==========
 local teamBusy, deathToken, lastDeathClock = false, 0, 0
 local DEATH_WINDOW = 8
 
@@ -167,7 +74,11 @@ local function runTeamSwitch(token)
 	if os.clock() - lastDeathClock > DEATH_WINDOW then return end
 	teamBusy = true
 	task.spawn(function()
-		if not getRTC() then Notify("RequestTeamChange not found") teamBusy = false return end
+		if not getRTC() then
+			window:Notify({ title = "Zyn", content = "RequestTeamChange not found" })
+			teamBusy = false
+			return
+		end
 		for _ = 1, 6 do
 			if token ~= deathToken then break end
 			goNeutral()
@@ -183,13 +94,16 @@ local function runTeamSwitch(token)
 			tries += 1
 			if preferred == "guard" and guardsFull() then task.wait(1) else goPreferred() task.wait(0.25) end
 		end
-		Notify(onPreferred() and ("Joined " .. preferred) or "Team switch failed")
+		window:Notify({ title = "Zyn", content = onPreferred() and ("Joined " .. preferred) or "Team switch failed" })
 		teamBusy = false
 	end)
 end
 
+-- ========== UNDER FLOOR / ABOVE / RETURN ==========
 local underFloorOn, underConn, savedY, holdY, platform = false, nil, nil, nil, nil
-local OFFSET, PLATFORM_SIZE, FOOT_GAP = 7, Vector3.new(24, 1.5, 24), 3.05
+local underOffset = 7
+local aboveOffset = 7
+local PLATFORM_SIZE, FOOT_GAP = Vector3.new(24, 1.5, 24), 3.05
 
 local function getRoot()
 	local c = player.Character
@@ -284,36 +198,50 @@ local function startUnder(y)
 end
 
 local function toggleUnderFloor()
-	if underFloorOn then stopUnder(true) Notify("Under Floor OFF") return end
+	if underFloorOn then
+		stopUnder(true)
+		window:Notify({ title = "Zyn", content = "Under Floor OFF" })
+		return
+	end
 	local root = getRoot()
-	if not root or not saveY() then Notify("Under Floor failed") return end
+	if not root or not saveY() then
+		window:Notify({ title = "Zyn", content = "Under Floor failed" })
+		return
+	end
 	local hit = Workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, -80, 0), rayParams())
-	local y = hit and (hit.Position.Y - OFFSET) or (root.Position.Y - OFFSET)
+	local y = hit and (hit.Position.Y - underOffset) or (root.Position.Y - underOffset)
 	root.CFrame = CFrame.new(root.Position.X, y, root.Position.Z)
 	root.AssemblyLinearVelocity = Vector3.zero
 	holdY = y
 	for _ = 1, 5 do ensurePlatform(root.Position) if platform then break end task.wait() end
 	startUnder(y)
-	Notify("Under Floor ON")
+	window:Notify({ title = "Zyn", content = "Under Floor ON (" .. underOffset .. " studs)" })
 end
 
 local function floorAbove()
 	if underFloorOn then stopUnder(false) end
 	local root = getRoot()
-	if not root or not saveY() then return end
+	if not root or not saveY() then
+		window:Notify({ title = "Zyn", content = "Above failed" })
+		return
+	end
 	local hit = Workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, 100, 0), rayParams())
-	local y = (not hit) and (root.Position.Y + OFFSET) or (hit.Position.Y + OFFSET)
-	if hit and hit.Position.Y <= root.Position.Y + 0.5 then Notify("No higher surface") return end
+	local y = (not hit) and (root.Position.Y + aboveOffset) or (hit.Position.Y + aboveOffset)
+	if hit and hit.Position.Y <= root.Position.Y + 0.5 then
+		window:Notify({ title = "Zyn", content = "No higher surface" })
+		return
+	end
 	root.CFrame = CFrame.new(root.Position.X, y, root.Position.Z)
 	root.AssemblyLinearVelocity = Vector3.zero
-	Notify("Floor above")
+	window:Notify({ title = "Zyn", content = "Floor Above (" .. aboveOffset .. " studs)" })
 end
 
 local function returnPos()
 	if underFloorOn then stopUnder(true) else restoreYOnly() destroyPlatform() end
-	Notify("Returned")
+	window:Notify({ title = "Zyn", content = "Returned" })
 end
 
+-- ========== FORCEFIELD ==========
 local ffConns = {}
 local function clearFfConns()
 	for _, c in ipairs(ffConns) do pcall(function() c:Disconnect() end) end
@@ -345,7 +273,7 @@ local function hookForceField(char)
 	end))
 end
 
--- ===== FLING + PGUI=====
+-- ========== FLING ==========
 local flingOn, flingConn, flingTarget = false, nil, nil
 
 local function hasNetOwner(part)
@@ -385,7 +313,9 @@ end
 
 local function startFling()
 	if not flingTarget or not flingTarget.Parent then
-		Notify("Select a player first")
+		if window then
+			window:Notify({ title = "Zyn", content = "Select a player first" })
+		end
 		return false
 	end
 	stopFling()
@@ -402,278 +332,459 @@ local function startFling()
 			end
 		end
 	end)
-	Notify("Fling ON → " .. flingTarget.Name)
+	if window then
+		window:Notify({ title = "Zyn", content = "Fling ON → " .. flingTarget.Name })
+	end
 	return true
 end
 
--- PlayerGui
-pcall(function()
-	local old = CoreGui:FindFirstChild("PlayerList")
-	if old then old:Destroy() end
-	local pg = player:FindFirstChild("PlayerGui")
-	if pg then
-		local o2 = pg:FindFirstChild("PlayerList")
-		if o2 then o2:Destroy() end
+-- ========== CUSTOM PLAYER LIST (Rayfield-style navy) ==========
+local NAVY = Color3.fromRGB(0, 0, 128)
+local NAVY_DARK = Color3.fromRGB(12, 12, 40)
+local NAVY_MID = Color3.fromRGB(28, 28, 70)
+local NAVY_LIGHT = Color3.fromRGB(50, 50, 120)
+local WHITE = Color3.fromRGB(230, 230, 240)
+local MUTED = Color3.fromRGB(160, 160, 180)
+local ACCENT = Color3.fromRGB(80, 100, 220)
+
+local playerListGui = nil
+local selectedRow = nil
+local selectedLabel = nil
+
+local function getTeamName(plr)
+	if plr.Team then return plr.Team.Name end
+	return "None"
+end
+
+local function getTeamColor(plr)
+	if plr.Team and plr.Team.TeamColor then
+		return plr.Team.TeamColor.Color
 	end
-end)
+	return MUTED
+end
 
-local ListGui = Instance.new("ScreenGui")
-ListGui.Name = "PlayerList"
-ListGui.ResetOnSpawn = false
-pcall(function() ListGui.Parent = CoreGui:FindFirstChild("RobloxGui") or CoreGui end)
-if not ListGui.Parent then ListGui.Parent = player:WaitForChild("PlayerGui") end
-
-local ListFrame = Instance.new("Frame")
-ListFrame.Size = UDim2.new(0, 240, 0, 300)
-ListFrame.Position = UDim2.new(0, 16, 0.3, 0)
-ListFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
-ListFrame.BorderSizePixel = 0
-ListFrame.Active = true
-ListFrame.Draggable = true
-ListFrame.Visible = false
-ListFrame.Parent = ListGui
-Instance.new("UICorner", ListFrame).CornerRadius = UDim.new(0, 8)
-
-local ListTitle = Instance.new("TextLabel")
-ListTitle.Size = UDim2.new(1, -40, 0, 26)
-ListTitle.Position = UDim2.new(0, 8, 0, 4)
-ListTitle.BackgroundTransparency = 1
-ListTitle.Text = "Players (live)"
-ListTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-ListTitle.Font = Enum.Font.GothamBold
-ListTitle.TextSize = 13
-ListTitle.TextXAlignment = Enum.TextXAlignment.Left
-ListTitle.Parent = ListFrame
-
-local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.new(0, 26, 0, 26)
-CloseBtn.Position = UDim2.new(1, -30, 0, 4)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(70, 40, 40)
-CloseBtn.Text = "X"
-CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-CloseBtn.Font = Enum.Font.GothamBold
-CloseBtn.TextSize = 12
-CloseBtn.Parent = ListFrame
-Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
-CloseBtn.MouseButton1Click:Connect(function() ListFrame.Visible = false end)
-
-local SelectedLbl = Instance.new("TextLabel")
-SelectedLbl.Size = UDim2.new(1, -16, 0, 20)
-SelectedLbl.Position = UDim2.new(0, 8, 0, 30)
-SelectedLbl.BackgroundTransparency = 1
-SelectedLbl.Text = "Selected: (none)"
-SelectedLbl.TextColor3 = Color3.fromRGB(140, 200, 140)
-SelectedLbl.Font = Enum.Font.Gotham
-SelectedLbl.TextSize = 11
-SelectedLbl.TextXAlignment = Enum.TextXAlignment.Left
-SelectedLbl.Parent = ListFrame
-
-local Scroll = Instance.new("ScrollingFrame")
-Scroll.Size = UDim2.new(1, -16, 1, -100)
-Scroll.Position = UDim2.new(0, 8, 0, 52)
-Scroll.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
-Scroll.BorderSizePixel = 0
-Scroll.ScrollBarThickness = 4
-Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-Scroll.Parent = ListFrame
-Instance.new("UICorner", Scroll).CornerRadius = UDim.new(0, 6)
-local lay = Instance.new("UIListLayout")
-lay.Parent = Scroll
-lay.Padding = UDim.new(0, 4)
-lay.SortOrder = Enum.SortOrder.Name
-
-local StartBtn = Instance.new("TextButton")
-StartBtn.Size = UDim2.new(0.48, -6, 0, 30)
-StartBtn.Position = UDim2.new(0, 8, 1, -38)
-StartBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 60)
-StartBtn.Text = "Start"
-StartBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-StartBtn.Font = Enum.Font.GothamBold
-StartBtn.TextSize = 12
-StartBtn.Parent = ListFrame
-Instance.new("UICorner", StartBtn).CornerRadius = UDim.new(0, 6)
-
-local StopBtn = Instance.new("TextButton")
-StopBtn.Size = UDim2.new(0.48, -6, 0, 30)
-StopBtn.Position = UDim2.new(0.52, 0, 1, -38)
-StopBtn.BackgroundColor3 = Color3.fromRGB(160, 50, 50)
-StopBtn.Text = "Stop"
-StopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-StopBtn.Font = Enum.Font.GothamBold
-StopBtn.TextSize = 12
-StopBtn.Parent = ListFrame
-Instance.new("UICorner", StopBtn).CornerRadius = UDim.new(0, 6)
-
-local function rebuildPlayerList()
-	for _, c in ipairs(Scroll:GetChildren()) do
-		if c:IsA("TextButton") then c:Destroy() end
-	end
-	if flingTarget and not flingTarget.Parent then
-		flingTarget = nil
-		stopFling()
-	end
-	local list = {}
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= player then table.insert(list, p) end
-	end
-	table.sort(list, function(a, b) return a.Name:lower() < b.Name:lower() end)
-	for _, p in ipairs(list) do
-		local b = Instance.new("TextButton")
-		b.Name = p.Name
-		b.Size = UDim2.new(1, -8, 0, 28)
-		b.BackgroundColor3 = (flingTarget == p) and Color3.fromRGB(40, 90, 50) or Color3.fromRGB(48, 48, 56)
-		b.Text = p.DisplayName .. "  (@" .. p.Name .. ")"
-		b.TextColor3 = Color3.fromRGB(255, 255, 255)
-		b.Font = Enum.Font.Gotham
-		b.TextSize = 12
-		b.Parent = Scroll
-		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
-		b.MouseButton1Click:Connect(function()
-			flingTarget = p
-			SelectedLbl.Text = "Selected: " .. p.DisplayName .. " (@" .. p.Name .. ")"
-			rebuildPlayerList()
-		end)
-	end
-	if flingTarget and flingTarget.Parent then
-		SelectedLbl.Text = "Selected: " .. flingTarget.DisplayName .. " (@" .. flingTarget.Name .. ")"
-	else
-		SelectedLbl.Text = "Selected: (none)"
+local function closePlayerList()
+	if playerListGui then
+		playerListGui:Destroy()
+		playerListGui = nil
+		selectedRow = nil
 	end
 end
 
-StartBtn.MouseButton1Click:Connect(function()
-	if flingOn then
-		stopFling()
-		StartBtn.Text = "Start"
-		StartBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 60)
-	elseif startFling() then
-		StartBtn.Text = "Running"
-		StartBtn.BackgroundColor3 = Color3.fromRGB(180, 120, 40)
+local function buildPlayerList()
+	closePlayerList()
+
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "ZynPlayerList"
+	sg.ResetOnSpawn = false
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.DisplayOrder = 100
+	pcall(function()
+		if syn and syn.protect_gui then syn.protect_gui(sg) end
+		if gethui then sg.Parent = gethui() else sg.Parent = game:GetService("CoreGui") end
+	end)
+	if not sg.Parent then sg.Parent = player:WaitForChild("PlayerGui") end
+	playerListGui = sg
+
+	-- Main frame
+	local main = Instance.new("Frame")
+	main.Name = "Main"
+	main.Size = UDim2.new(0, 340, 0, 420)
+	main.Position = UDim2.new(0.5, -170, 0.5, -210)
+	main.BackgroundColor3 = NAVY_DARK
+	main.BorderSizePixel = 0
+	main.Parent = sg
+	Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = NAVY
+	stroke.Thickness = 1.5
+	stroke.Parent = main
+
+	-- Title bar
+	local titleBar = Instance.new("Frame")
+	titleBar.Size = UDim2.new(1, 0, 0, 42)
+	titleBar.BackgroundColor3 = NAVY
+	titleBar.BorderSizePixel = 0
+	titleBar.Parent = main
+	Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 10)
+	-- cover bottom corners of title
+	local titleCover = Instance.new("Frame")
+	titleCover.Size = UDim2.new(1, 0, 0, 12)
+	titleCover.Position = UDim2.new(0, 0, 1, -12)
+	titleCover.BackgroundColor3 = NAVY
+	titleCover.BorderSizePixel = 0
+	titleCover.Parent = titleBar
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(1, -50, 1, 0)
+	title.Position = UDim2.new(0, 14, 0, 0)
+	title.BackgroundTransparency = 1
+	title.Text = "Player List"
+	title.TextColor3 = WHITE
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 16
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = titleBar
+
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.Size = UDim2.new(0, 32, 0, 32)
+	closeBtn.Position = UDim2.new(1, -38, 0, 5)
+	closeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 90)
+	closeBtn.Text = "×"
+	closeBtn.TextColor3 = WHITE
+	closeBtn.Font = Enum.Font.GothamBold
+	closeBtn.TextSize = 20
+	closeBtn.BorderSizePixel = 0
+	closeBtn.Parent = titleBar
+	Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
+	closeBtn.MouseButton1Click:Connect(closePlayerList)
+
+	-- Selected label
+	selectedLabel = Instance.new("TextLabel")
+	selectedLabel.Size = UDim2.new(1, -24, 0, 22)
+	selectedLabel.Position = UDim2.new(0, 12, 0, 48)
+	selectedLabel.BackgroundTransparency = 1
+	selectedLabel.Text = flingTarget and ("Selected: " .. flingTarget.DisplayName) or "Selected: none"
+	selectedLabel.TextColor3 = MUTED
+	selectedLabel.Font = Enum.Font.Gotham
+	selectedLabel.TextSize = 13
+	selectedLabel.TextXAlignment = Enum.TextXAlignment.Left
+	selectedLabel.Parent = main
+
+	-- Scroll frame
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Size = UDim2.new(1, -16, 1, -140)
+	scroll.Position = UDim2.new(0, 8, 0, 74)
+	scroll.BackgroundColor3 = NAVY_MID
+	scroll.BorderSizePixel = 0
+	scroll.ScrollBarThickness = 4
+	scroll.ScrollBarImageColor3 = ACCENT
+	scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.Parent = main
+	Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 8)
+
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.SortOrder = Enum.SortOrder.Name
+	listLayout.Padding = UDim.new(0, 6)
+	listLayout.Parent = scroll
+
+	local listPad = Instance.new("UIPadding")
+	listPad.PaddingTop = UDim.new(0, 6)
+	listPad.PaddingBottom = UDim.new(0, 6)
+	listPad.PaddingLeft = UDim.new(0, 6)
+	listPad.PaddingRight = UDim.new(0, 6)
+	listPad.Parent = scroll
+
+	local function selectPlayer(plr, row)
+		flingTarget = plr
+		if selectedRow and selectedRow.Parent then
+			selectedRow.BackgroundColor3 = NAVY_DARK
+		end
+		selectedRow = row
+		row.BackgroundColor3 = NAVY_LIGHT
+		if selectedLabel then
+			selectedLabel.Text = "Selected: " .. plr.DisplayName
+			selectedLabel.TextColor3 = WHITE
+		end
+		if window then
+			window:Notify({ title = "Zyn", content = "Selected: " .. plr.DisplayName })
+		end
 	end
-end)
 
-StopBtn.MouseButton1Click:Connect(function()
-	stopFling()
-	StartBtn.Text = "Start"
-	StartBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 60)
-	Notify("Fling stopped")
-end)
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr == player then continue end
 
--- THIS is what keeps the list updated
-Players.PlayerAdded:Connect(function()
-	task.defer(rebuildPlayerList)
-end)
+		local row = Instance.new("TextButton")
+		row.Name = plr.Name
+		row.Size = UDim2.new(1, -4, 0, 52)
+		row.BackgroundColor3 = (flingTarget == plr) and NAVY_LIGHT or NAVY_DARK
+		row.BorderSizePixel = 0
+		row.Text = ""
+		row.AutoButtonColor = false
+		row.Parent = scroll
+		Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+
+		if flingTarget == plr then selectedRow = row end
+
+		-- Avatar
+		local avatar = Instance.new("ImageLabel")
+		avatar.Size = UDim2.new(0, 40, 0, 40)
+		avatar.Position = UDim2.new(0, 6, 0.5, -20)
+		avatar.BackgroundColor3 = NAVY_MID
+		avatar.BorderSizePixel = 0
+		avatar.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48", plr.UserId)
+		avatar.Parent = row
+		Instance.new("UICorner", avatar).CornerRadius = UDim.new(1, 0)
+
+		-- Name
+		local nameLbl = Instance.new("TextLabel")
+		nameLbl.Size = UDim2.new(1, -100, 0, 20)
+		nameLbl.Position = UDim2.new(0, 54, 0, 8)
+		nameLbl.BackgroundTransparency = 1
+		nameLbl.Text = plr.DisplayName
+		nameLbl.TextColor3 = WHITE
+		nameLbl.Font = Enum.Font.GothamBold
+		nameLbl.TextSize = 14
+		nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+		nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+		nameLbl.Parent = row
+
+		-- Username (smaller)
+		local userLbl = Instance.new("TextLabel")
+		userLbl.Size = UDim2.new(1, -100, 0, 14)
+		userLbl.Position = UDim2.new(0, 54, 0, 28)
+		userLbl.BackgroundTransparency = 1
+		userLbl.Text = "@" .. plr.Name
+		userLbl.TextColor3 = MUTED
+		userLbl.Font = Enum.Font.Gotham
+		userLbl.TextSize = 11
+		userLbl.TextXAlignment = Enum.TextXAlignment.Left
+		userLbl.TextTruncate = Enum.TextTruncate.AtEnd
+		userLbl.Parent = row
+
+		-- Team badge
+		local teamName = getTeamName(plr)
+		local teamBadge = Instance.new("TextLabel")
+		teamBadge.Size = UDim2.new(0, 70, 0, 20)
+		teamBadge.Position = UDim2.new(1, -76, 0.5, -10)
+		teamBadge.BackgroundColor3 = getTeamColor(plr)
+		teamBadge.Text = teamName
+		teamBadge.TextColor3 = Color3.new(1, 1, 1)
+		teamBadge.Font = Enum.Font.GothamBold
+		teamBadge.TextSize = 10
+		teamBadge.BorderSizePixel = 0
+		teamBadge.Parent = row
+		Instance.new("UICorner", teamBadge).CornerRadius = UDim.new(0, 6)
+
+		row.MouseButton1Click:Connect(function()
+			selectPlayer(plr, row)
+		end)
+	end
+
+	-- Bottom buttons
+	local btnRow = Instance.new("Frame")
+	btnRow.Size = UDim2.new(1, -16, 0, 40)
+	btnRow.Position = UDim2.new(0, 8, 1, -50)
+	btnRow.BackgroundTransparency = 1
+	btnRow.Parent = main
+
+	local flingBtn = Instance.new("TextButton")
+	flingBtn.Size = UDim2.new(0.48, -4, 1, 0)
+	flingBtn.Position = UDim2.new(0, 0, 0, 0)
+	flingBtn.BackgroundColor3 = NAVY
+	flingBtn.Text = flingOn and "Stop Fling" or "Fling"
+	flingBtn.TextColor3 = WHITE
+	flingBtn.Font = Enum.Font.GothamBold
+	flingBtn.TextSize = 14
+	flingBtn.BorderSizePixel = 0
+	flingBtn.Parent = btnRow
+	Instance.new("UICorner", flingBtn).CornerRadius = UDim.new(0, 8)
+
+	flingBtn.MouseButton1Click:Connect(function()
+		if flingOn then
+			stopFling()
+			flingBtn.Text = "Fling"
+			if window then window:Notify({ title = "Zyn", content = "Fling stopped" }) end
+		else
+			if startFling() then
+				flingBtn.Text = "Stop Fling"
+			end
+		end
+	end)
+
+	local refreshBtn = Instance.new("TextButton")
+	refreshBtn.Size = UDim2.new(0.48, -4, 1, 0)
+	refreshBtn.Position = UDim2.new(0.52, 4, 0, 0)
+	refreshBtn.BackgroundColor3 = NAVY_MID
+	refreshBtn.Text = "Refresh"
+	refreshBtn.TextColor3 = WHITE
+	refreshBtn.Font = Enum.Font.GothamBold
+	refreshBtn.TextSize = 14
+	refreshBtn.BorderSizePixel = 0
+	refreshBtn.Parent = btnRow
+	Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 8)
+
+	refreshBtn.MouseButton1Click:Connect(function()
+		buildPlayerList()
+	end)
+
+	-- Drag title bar
+	local dragging, dragStart, startPos
+	titleBar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = main.Position
+		end
+	end)
+	titleBar.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+	end)
+end
+
+-- ========== RAYFIELD GEN2 ==========
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+
+local window = Rayfield:CreateWindow({
+	name = "Zyn Admin",
+	subtitle = "Rayfield Gen2",
+	sidebarLayout = true,
+	theme = {
+		TabColor = Color3.fromRGB(200, 200, 220),
+		TabBackground = ColorSequence.new(Color3.fromRGB(0, 0, 128)),
+		TabStroke = ColorSequence.new(Color3.fromRGB(40, 40, 180)),
+		ElementStroke = Color3.fromRGB(0, 0, 128),
+		ActionColor = Color3.fromRGB(0, 0, 128),
+	},
+	configuration = {
+		autoSave = true,
+		autoLoad = true,
+		fileName = "ZynAdmin",
+	},
+})
+
+-- ========== COMBAT TAB ==========
+local combatTab = window:CreateTab({ name = "Combat", icon = 93364949241311 })
+combatTab:CreateSection({ name = "Combat" })
+combatTab:CreateText({
+	name = "No combat features",
+	text = "Use Player / Extras tabs for Floor Tools and Fling.",
+})
+
+-- ========== VISUAL TAB ==========
+local visualTab = window:CreateTab({ name = "Visual", icon = 84750991656135 })
+visualTab:CreateSection({ name = "Visual" })
+visualTab:CreateText({
+	name = "No visual features",
+	text = "Placeholder for future ESP / visual tools.",
+})
+
+-- ========== PLAYER TAB (Floor Tools) ==========
+local playerTab = window:CreateTab({ name = "Player", icon = 100604009889706 })
+playerTab:CreateSection({ name = "Floor Tools" })
+playerTab:CreateButton({
+	name = "Under Floor",
+	callback = function()
+		toggleUnderFloor()
+	end,
+})
+playerTab:CreateButton({
+	name = "Above",
+	callback = function()
+		floorAbove()
+	end,
+})
+playerTab:CreateButton({
+	name = "Return to Original",
+	callback = function()
+		returnPos()
+	end,
+})
+
+playerTab:CreateSection({ name = "Keybinds" })
+playerTab:CreateKeybind({
+	name = "Under Floor Key",
+	value = binds.under ~= "None" and Enum.KeyCode[binds.under] or nil,
+	callback = function()
+		toggleUnderFloor()
+	end,
+	onChanged = function(key)
+		binds.under = key and key.Name or "None"
+		window:Notify({ title = "Zyn", content = "Under Floor bound to " .. binds.under })
+	end,
+})
+playerTab:CreateKeybind({
+	name = "Above Key",
+	value = binds.above ~= "None" and Enum.KeyCode[binds.above] or nil,
+	callback = function()
+		floorAbove()
+	end,
+	onChanged = function(key)
+		binds.above = key and key.Name or "None"
+		window:Notify({ title = "Zyn", content = "Above bound to " .. binds.above })
+	end,
+})
+playerTab:CreateKeybind({
+	name = "Return Key",
+	value = binds.ret ~= "None" and Enum.KeyCode[binds.ret] or nil,
+	callback = function()
+		returnPos()
+	end,
+	onChanged = function(key)
+		binds.ret = key and key.Name or "None"
+		window:Notify({ title = "Zyn", content = "Return bound to " .. binds.ret })
+	end,
+})
+
+-- ========== EXTRAS TAB ==========
+local extrasTab = window:CreateTab({ name = "Extras", icon = 85925158736685 })
+extrasTab:CreateSection({ name = "Team on Death" })
+extrasTab:CreateDropdown({
+	name = "Preferred Team",
+	options = { "Prisoner", "Guard" },
+	value = preferred == "guard" and "Guard" or "Prisoner",
+	callback = function(v)
+		preferred = tostring(v):lower():find("guard") and "guard" or "inmate"
+	end,
+})
+extrasTab:CreateToggle({
+	name = "On Death",
+	value = autoOnDeath,
+	callback = function(v)
+		autoOnDeath = v
+	end,
+})
+
+extrasTab:CreateSection({ name = "ForceField" })
+extrasTab:CreateToggle({
+	name = "Reset when ForceField wears off",
+	value = ffReset,
+	callback = function(v)
+		ffReset = v
+	end,
+})
+
+extrasTab:CreateSection({ name = "Owned Seat Fling" })
+extrasTab:CreateText({
+	name = "How to use",
+	text = "Open the player list, click a player (avatar + team shown), then press Fling.",
+})
+extrasTab:CreateButton({
+	name = "Open Player List",
+	callback = function()
+		buildPlayerList()
+	end,
+})
+extrasTab:CreateButton({
+	name = "Stop Fling",
+	callback = function()
+		stopFling()
+		window:Notify({ title = "Zyn", content = "Fling stopped" })
+	end,
+})
+
+-- Live updates for fling target leaving
 Players.PlayerRemoving:Connect(function(p)
 	if p == flingTarget then
 		flingTarget = nil
 		stopFling()
-		StartBtn.Text = "Start"
-		StartBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 60)
+		if selectedLabel then
+			selectedLabel.Text = "Selected: none"
+			selectedLabel.TextColor3 = MUTED
+		end
 	end
-	task.defer(rebuildPlayerList)
 end)
 
-rebuildPlayerList()
-
--- UI tabs
-AutoTab:CreateSection("Team on Death")
-AutoTab:CreateDropdown({
-	Name = "Preferred Team",
-	Options = { "Prisoner", "Guard" },
-	CurrentOption = { preferred == "guard" and "Guard" or "Prisoner" },
-	MultipleOptions = false,
-	Callback = function(opt)
-		local v = type(opt) == "table" and opt[1] or opt
-		preferred = tostring(v):lower():find("guard") and "guard" or "inmate"
-	end,
-})
-onDeathToggle = AutoTab:CreateToggle({
-	Name = "On Death",
-	CurrentValue = autoOnDeath,
-	Callback = function(v) autoOnDeath = v end,
-})
-
-TpTab:CreateSection("Floor")
-TpTab:CreateToggle({
-	Name = "Under",
-	CurrentValue = false,
-	Callback = function(v) if v ~= underFloorOn then toggleUnderFloor() end end,
-})
-TpTab:CreateButton({ Name = "Above", Callback = floorAbove })
-TpTab:CreateButton({ Name = "Return", Callback = returnPos })
-
-BindTab:CreateSection("Binds")
-BindTab:CreateKeybind({
-	Name = "Under", CurrentKeybind = binds.under, HoldToInteract = false,
-	Callback = toggleUnderFloor,
-	ChangedCallback = function(key) binds.under = key or "None" end,
-})
-BindTab:CreateKeybind({
-	Name = "Above", CurrentKeybind = binds.above, HoldToInteract = false,
-	Callback = floorAbove,
-	ChangedCallback = function(key) binds.above = key or "None" end,
-})
-BindTab:CreateKeybind({
-	Name = "Return", CurrentKeybind = binds.ret, HoldToInteract = false,
-	Callback = returnPos,
-	ChangedCallback = function(key) binds.ret = key or "None" end,
-})
-
-ExtrasTab:CreateSection("ForceField")
-ffToggle = ExtrasTab:CreateToggle({
-	Name = "Reset when ForceField wears off",
-	CurrentValue = ffReset,
-	Callback = function(v) ffReset = v end,
-})
-
-ExtrasTab:CreateSection("Owned seat fling")
-ExtrasTab:CreateButton({
-	Name = "Open player list",
-	Callback = function()
-		ListFrame.Visible = true
-		rebuildPlayerList()
-	end,
-})
-ExtrasTab:CreateButton({
-	Name = "Close player list",
-	Callback = function() ListFrame.Visible = false end,
-})
-
-ExtrasTab:CreateSection("Configs")
-local typedName = ""
-ExtrasTab:CreateInput({
-	Name = "Config name",
-	PlaceholderText = "name",
-	CurrentValue = "",
-	Callback = function(t) typedName = tostring(t or ""):gsub("^%s+", ""):gsub("%s+$", "") end,
-})
-ExtrasTab:CreateButton({
-	Name = "Create config",
-	Callback = function()
-		if typedName == "" then Notify("Type a name") return end
-		profiles[typedName] = snapshot()
-		saveToDisk()
-		Notify("Saved " .. typedName)
-	end,
-})
-for _, name in ipairs(sortedNames()) do
-	local cfg = name
-	ExtrasTab:CreateButton({ Name = "Load: " .. cfg, Callback = function() loadProfile(cfg) end })
-end
-ExtrasTab:CreateToggle({
-	Name = "Auto-load enabled",
-	CurrentValue = meta.autoLoad,
-	Callback = function(v) meta.autoLoad = v saveToDisk() end,
-})
-for _, name in ipairs(sortedNames()) do
-	local cfg = name
-	ExtrasTab:CreateButton({
-		Name = "Auto-load: " .. cfg,
-		Callback = function() meta.autoLoadName = cfg saveToDisk() Notify("Auto-load " .. cfg) end,
-	})
-end
-
+-- ========== CHARACTER HOOKS ==========
 local function hook(char)
 	local hum = char:WaitForChild("Humanoid", 10)
 	if not hum then return end
@@ -696,5 +807,5 @@ player.CharacterAdded:Connect(function(char)
 	if underFloorOn then stopUnder(false) end
 end)
 
-Notify("Zyn Admin loaded")
-print("Zyn Admin")
+window:Notify({ title = "Lithium Battery", content = "Loaded with Rayfield Gen2" })
+print("Lithium Battery - Rayfield Gen2")
