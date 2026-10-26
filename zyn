@@ -1,111 +1,250 @@
 --[[
-    Lithium Battery - Rayfield Gen2
-    Same features • Navy accent • Floor Tools + Keybinds + Fling
-    Player list with avatars + team
-    + Auto-refreshing player list + ESP in Visual tab
+    Lithium Better By zynn
+    Main = Linoria (orange) | PGui = separate window
+    F1 = toggle PGui
+    View = toggle spectate | Fling = CFrame based
+    + Working Silent Aim (ShootEvent hook) + Fire Rate + FOV
 ]]
+
+-- Load Linoria
+local repo = "https://raw.githubusercontent.com/mstudio45/LinoriaLib/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
+pcall(function() Library.Font = Enum.Font.Arial end)
+
+-- Services
 local Players = game:GetService("Players")
-local Teams = game:GetService("Teams")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 
--- ========== CONFIG ==========
-local preferred = "inmate"
-local autoOnDeath = true
-local ffReset = false
-local binds = { under = "None", above = "None", ret = "None" }
-
--- ========== TEAM LOGIC ==========
-local teamBusy, deathToken, lastDeathClock = false, 0, 0
-local DEATH_WINDOW = 8
-
-local function getRTC()
-	local r = ReplicatedStorage:FindFirstChild("Remotes")
-	if r and r:FindFirstChild("RequestTeamChange") then return r.RequestTeamChange end
-	for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
-		if d.Name == "RequestTeamChange" and (d:IsA("RemoteFunction") or d:IsA("RemoteEvent")) then return d end
-	end
-end
-
-local function requestTeam(team)
-	local remote = getRTC()
-	if not remote or not team then return end
-	pcall(function()
-		if remote:IsA("RemoteFunction") then remote:InvokeServer(team, 1) else remote:FireServer(team, 1) end
-	end)
-end
-
-local function goNeutral()
-	local t = Teams:FindFirstChild("Neutral")
-	if t then requestTeam(t) end
-end
-
-local function goPreferred()
-	if preferred == "guard" then
-		local t = Teams:FindFirstChild("Guards")
-		if t then requestTeam(t) end
-	else
-		local t = Teams:FindFirstChild("Inmates")
-		if t then requestTeam(t) end
-	end
-end
-
-local function onPreferred()
-	local n = player.Team and player.Team.Name:lower() or ""
-	if preferred == "guard" then return n:find("guard") or n:find("police") end
-	return n:find("inmate") or n:find("prisoner")
-end
-
-local function isNeutral()
-	local n = player.Team and player.Team.Name:lower() or ""
-	return n:find("neutral") ~= nil
-end
-
-local function guardsFull()
-	local g = Teams:FindFirstChild("Guards")
-	return g and #g:GetPlayers() > 7
-end
-
-local function runTeamSwitch(token)
-	if teamBusy or not autoOnDeath or token ~= deathToken then return end
-	if os.clock() - lastDeathClock > DEATH_WINDOW then return end
-	teamBusy = true
-	task.spawn(function()
-		if not getRTC() then
-			window:Notify({ title = "Lithium Battery", content = "RequestTeamChange not found" })
-			teamBusy = false
-			return
-		end
-		for _ = 1, 6 do
-			if token ~= deathToken then break end
-			goNeutral()
-			task.wait(0.15)
-			if isNeutral() then break end
-		end
-		task.wait(0.25)
-		local tries = 0
-		while tries < 40 do
-			if token ~= deathToken or not autoOnDeath then break end
-			if os.clock() - lastDeathClock > DEATH_WINDOW then break end
-			if onPreferred() then break end
-			tries += 1
-			if preferred == "guard" and guardsFull() then task.wait(1) else goPreferred() task.wait(0.25) end
-		end
-		window:Notify({ title = "Lithium Battery", content = onPreferred() and ("Joined " .. preferred) or "Team switch failed" })
-		teamBusy = false
-	end)
-end
-
--- ========== UNDER FLOOR / ABOVE / RETURN ==========
-local underFloorOn, underConn, savedY, holdY, platform = false, nil, nil, nil, nil
+-- ========== STATE ==========
+local ESPEnabled = false
+local FFReset = false
+local AntiFling = false
 local underOffset = 7
 local aboveOffset = 7
-local PLATFORM_SIZE, FOOT_GAP = Vector3.new(24, 1.5, 24), 3.05
+local selectedFlingTarget = nil
+local viewingPlayer = nil
+local flingActive = false
 
+-- ========== FIRE RATE ==========
+local FireRateEnabled = false
+local DesiredFireRate = 0.05
+local ForceAutoFire = true
+
+local function applyFireRate(tool)
+	if not tool or not tool:IsA("Tool") then return end
+	if tool:GetAttribute("ToolType") ~= "Gun" then return end
+	if FireRateEnabled then
+		tool:SetAttribute("FireRate", DesiredFireRate)
+		if ForceAutoFire then
+			tool:SetAttribute("AutoFire", true)
+		end
+	end
+end
+
+local function onCharacterFireRate(char)
+	for _, child in ipairs(char:GetChildren()) do
+		if child:IsA("Tool") then applyFireRate(child) end
+	end
+	char.ChildAdded:Connect(function(child)
+		if child:IsA("Tool") and child:GetAttribute("ToolType") == "Gun" then
+			task.defer(function() applyFireRate(child) end)
+			local conn
+			conn = RunService.Heartbeat:Connect(function()
+				if not child.Parent or child.Parent ~= char then
+					conn:Disconnect()
+					return
+				end
+				if FireRateEnabled then applyFireRate(child) end
+			end)
+		end
+	end)
+end
+
+if player.Character then onCharacterFireRate(player.Character) end
+player.CharacterAdded:Connect(onCharacterFireRate)
+
+local function SetFireRateEnabled(state)
+	FireRateEnabled = state
+	local char = player.Character
+	if char then
+		for _, tool in ipairs(char:GetChildren()) do
+			if tool:IsA("Tool") then applyFireRate(tool) end
+		end
+	end
+end
+
+local function SetFireRateValue(value)
+	DesiredFireRate = math.clamp(value, 0.01, 0.5)
+	if FireRateEnabled then SetFireRateEnabled(true) end
+end
+
+local function SetForceAutoFire(state)
+	ForceAutoFire = state
+	if FireRateEnabled then SetFireRateEnabled(true) end
+end
+
+-- ========== WORKING SILENT AIM (ShootEvent hook) ==========
+local SilentAim = {
+	Enabled = false,
+	HitPart = "Head",
+	Range = 500,
+	HitChance = 100,
+	FOV = 120,
+	ShowFOV = false,
+	TeamCheck = true,
+}
+
+local currentTarget = nil
+local FOVCircle = nil
+
+pcall(function()
+	FOVCircle = Drawing.new("Circle")
+	FOVCircle.Thickness = 1.5
+	FOVCircle.NumSides = 64
+	FOVCircle.Radius = SilentAim.FOV
+	FOVCircle.Filled = false
+	FOVCircle.Color = Color3.fromRGB(255, 140, 0)
+	FOVCircle.Visible = false
+end)
+
+local function isValidTarget(plr)
+	if not plr or plr == player then return false end
+	local char = plr.Character
+	if not char then return false end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return false end
+	if char:FindFirstChildOfClass("ForceField") then return false end
+
+	if SilentAim.TeamCheck then
+		if plr.Team and player.Team and plr.Team == player.Team then return false end
+		if player.Team and player.Team.Name == "Guards" and plr.Team and plr.Team.Name == "Inmates" then
+			if not char:GetAttribute("Hostile") then return false end
+		end
+	end
+	return true
+end
+
+local function worldToScreen(pos)
+	local cam = Workspace.CurrentCamera
+	local screen, onScreen = cam:WorldToViewportPoint(pos)
+	return Vector2.new(screen.X, screen.Y), onScreen, screen.Z
+end
+
+local function getClosestTarget()
+	local cam = Workspace.CurrentCamera
+	local mousePos = UserInputService:GetMouseLocation()
+	local closest, closestDist = nil, SilentAim.FOV
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if isValidTarget(plr) then
+			local part = plr.Character:FindFirstChild(SilentAim.HitPart)
+				or plr.Character:FindFirstChild("Head")
+				or plr.Character:FindFirstChild("HumanoidRootPart")
+			if part then
+				local screenPos, onScreen, depth = worldToScreen(part.Position)
+				if onScreen and depth > 0 then
+					local distFromMouse = (screenPos - mousePos).Magnitude
+					local worldDist = (cam.CFrame.Position - part.Position).Magnitude
+					if distFromMouse <= SilentAim.FOV and worldDist <= SilentAim.Range then
+						if distFromMouse < closestDist then
+							closestDist = distFromMouse
+							closest = plr
+						end
+					end
+				end
+			end
+		end
+	end
+	return closest
+end
+
+local function shouldHit()
+	return math.random(1, 100) <= SilentAim.HitChance
+end
+
+RunService.RenderStepped:Connect(function()
+	if FOVCircle then
+		local mouse = UserInputService:GetMouseLocation()
+		FOVCircle.Position = mouse
+		FOVCircle.Radius = SilentAim.FOV
+		FOVCircle.Visible = SilentAim.ShowFOV and SilentAim.Enabled
+		FOVCircle.Color = currentTarget and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 140, 0)
+	end
+	if SilentAim.Enabled then
+		currentTarget = getClosestTarget()
+	else
+		currentTarget = nil
+	end
+end)
+
+-- Hook the real ShootEvent (from GunController)
+local GunRemotes = ReplicatedStorage:FindFirstChild("GunRemotes")
+local ShootEvent = GunRemotes and GunRemotes:FindFirstChild("ShootEvent")
+
+if ShootEvent then
+	local oldFireServer
+	oldFireServer = hookfunction(ShootEvent.FireServer, function(self, data, ...)
+		if SilentAim.Enabled and currentTarget and shouldHit() then
+			local char = currentTarget.Character
+			local part = char and (char:FindFirstChild(SilentAim.HitPart)
+				or char:FindFirstChild("Head")
+				or char:FindFirstChild("HumanoidRootPart"))
+			if part and typeof(data) == "table" then
+				for _, shot in ipairs(data) do
+					if typeof(shot) == "table" then
+						shot[2] = part.Position -- redirect hit position
+						shot[3] = part
+					end
+				end
+			end
+		end
+		return oldFireServer(self, data, ...)
+	end)
+	print("[Silent Aim] ShootEvent hooked")
+else
+	warn("[Silent Aim] GunRemotes.ShootEvent not found")
+end
+
+-- Backup mouse hook (helps tracers)
+pcall(function()
+	local oldGetMouseLocation
+	oldGetMouseLocation = hookfunction(UserInputService.GetMouseLocation, function(self)
+		if SilentAim.Enabled and currentTarget and shouldHit() then
+			local part = currentTarget.Character
+				and (currentTarget.Character:FindFirstChild(SilentAim.HitPart)
+					or currentTarget.Character:FindFirstChild("Head"))
+			if part then
+				local screenPos, onScreen = worldToScreen(part.Position)
+				if onScreen then return screenPos end
+			end
+		end
+		return oldGetMouseLocation(self)
+	end)
+end)
+
+local function notify(msg)
+	Library:Notify(tostring(msg), 3)
+end
+
+local function protect(gui)
+	pcall(function()
+		if syn and syn.protect_gui then syn.protect_gui(gui) end
+		if gethui then gui.Parent = gethui() else gui.Parent = CoreGui end
+	end)
+	if not gui.Parent then gui.Parent = player:WaitForChild("PlayerGui") end
+end
+
+-- ========== HELPERS ==========
 local function getRoot()
 	local c = player.Character
 	return c and c:FindFirstChild("HumanoidRootPart")
@@ -115,6 +254,11 @@ local function getHum()
 	local c = player.Character
 	return c and c:FindFirstChildOfClass("Humanoid")
 end
+
+-- ========== UNDER / ABOVE / RETURN ==========
+local underFloorOn, underConn, savedY, holdY, platform = false, nil, nil, nil, nil
+local aboveOn = false
+local PLATFORM_SIZE, FOOT_GAP = Vector3.new(24, 1.5, 24), 3.05
 
 local function rayParams()
 	local rp = RaycastParams.new()
@@ -145,8 +289,18 @@ end
 local function destroyPlatform()
 	if platform then pcall(function() platform:Destroy() end) platform = nil end
 	for _, v in ipairs(Workspace:GetChildren()) do
-		if v.Name == "UnderPlatform" then pcall(function() v:Destroy() end) end
+		if v.Name == "UnderPlatform" or v.Name == "AbovePlatform" then
+			pcall(function() v:Destroy() end)
+		end
 	end
+end
+
+local function stopAllFloor()
+	underFloorOn = false
+	aboveOn = false
+	if underConn then underConn:Disconnect() underConn = nil end
+	destroyPlatform()
+	holdY = nil
 end
 
 local function ensurePlatform(rootPos)
@@ -160,7 +314,7 @@ local function ensurePlatform(rootPos)
 		p.CanQuery = false
 		p.CanTouch = false
 		p.Material = Enum.Material.SmoothPlastic
-		p.Color = Color3.fromRGB(60, 60, 70)
+		p.Color = Color3.fromRGB(255, 140, 0)
 		p.Transparency = 0.3
 		p.Size = PLATFORM_SIZE
 		p.CFrame = CFrame.new(rootPos.X, py, rootPos.Z)
@@ -171,22 +325,15 @@ local function ensurePlatform(rootPos)
 	end
 end
 
-local function stopUnder(doRestoreY)
-	underFloorOn = false
-	if underConn then underConn:Disconnect() underConn = nil end
-	destroyPlatform()
-	if doRestoreY then restoreYOnly() end
-	holdY = nil
-end
-
-local function startUnder(y)
-	stopUnder(false)
+local function startHold(y, isAbove)
+	stopAllFloor()
 	holdY = y
-	underFloorOn = true
+	underFloorOn = not isAbove
+	aboveOn = isAbove
 	local root = getRoot()
 	if root then ensurePlatform(root.Position) end
 	underConn = RunService.Heartbeat:Connect(function()
-		if not underFloorOn then return end
+		if not holdY then return end
 		local r = getRoot()
 		if not r then return end
 		r.CFrame = CFrame.new(r.Position.X, holdY, r.Position.Z) * (r.CFrame - r.CFrame.Position)
@@ -200,81 +347,66 @@ end
 
 local function toggleUnderFloor()
 	if underFloorOn then
-		stopUnder(true)
-		window:Notify({ title = "Lithium Battery", content = "Under Floor OFF" })
+		stopAllFloor()
+		restoreYOnly()
+		notify("Under Floor OFF")
 		return
 	end
 	local root = getRoot()
-	if not root or not saveY() then
-		window:Notify({ title = "Lithium Battery", content = "Under Floor failed" })
-		return
-	end
+	if not root or not saveY() then notify("Under Floor failed") return end
 	local hit = Workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, -80, 0), rayParams())
 	local y = hit and (hit.Position.Y - underOffset) or (root.Position.Y - underOffset)
 	root.CFrame = CFrame.new(root.Position.X, y, root.Position.Z)
 	root.AssemblyLinearVelocity = Vector3.zero
-	holdY = y
-	for _ = 1, 5 do ensurePlatform(root.Position) if platform then break end task.wait() end
-	startUnder(y)
-	window:Notify({ title = "Lithium Battery", content = "Under Floor ON (" .. underOffset .. " studs)" })
+	for _ = 1, 5 do
+		holdY = y
+		ensurePlatform(root.Position)
+		if platform then break end
+		task.wait()
+	end
+	startHold(y, false)
+	notify("Under Floor ON (" .. underOffset .. " studs)")
 end
 
 local function floorAbove()
-	if underFloorOn then stopUnder(false) end
 	local root = getRoot()
-	if not root or not saveY() then
-		window:Notify({ title = "Lithium Battery", content = "Above failed" })
-		return
-	end
+	if not root or not saveY() then notify("Above failed") return end
 	local hit = Workspace:Raycast(root.Position + Vector3.new(0, 2, 0), Vector3.new(0, 100, 0), rayParams())
 	local y = (not hit) and (root.Position.Y + aboveOffset) or (hit.Position.Y + aboveOffset)
-	if hit and hit.Position.Y <= root.Position.Y + 0.5 then
-		window:Notify({ title = "Lithium Battery", content = "No higher surface" })
-		return
-	end
+	if hit and hit.Position.Y <= root.Position.Y + 0.5 then notify("No higher surface") return end
 	root.CFrame = CFrame.new(root.Position.X, y, root.Position.Z)
 	root.AssemblyLinearVelocity = Vector3.zero
-	window:Notify({ title = "Lithium Battery", content = "Floor Above (" .. aboveOffset .. " studs)" })
+	startHold(y, true)
+	notify("Floor Above (" .. aboveOffset .. " studs)")
 end
 
 local function returnPos()
-	if underFloorOn then stopUnder(true) else restoreYOnly() destroyPlatform() end
-	window:Notify({ title = "Lithium Battery", content = "Returned" })
+	stopAllFloor()
+	restoreYOnly()
+	notify("Returned")
 end
 
--- ========== FORCEFIELD ==========
-local ffConns = {}
-local function clearFfConns()
-	for _, c in ipairs(ffConns) do pcall(function() c:Disconnect() end) end
-	table.clear(ffConns)
+-- ========== VIEW ==========
+local function stopView()
+	viewingPlayer = nil
+	local hum = getHum()
+	if hum then Workspace.CurrentCamera.CameraSubject = hum end
+	notify("Stopped viewing")
 end
 
-local function doResetFromFF()
-	if not ffReset then return end
-	local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-	if hum and hum.Health > 0 then hum.Health = 0 end
+local function toggleView(plr)
+	if viewingPlayer == plr then
+		stopView()
+		return
+	end
+	if plr.Character and plr.Character:FindFirstChild("Humanoid") then
+		viewingPlayer = plr
+		Workspace.CurrentCamera.CameraSubject = plr.Character.Humanoid
+		notify("Viewing " .. plr.DisplayName .. " (View again to stop)")
+	end
 end
 
-local function watchForceField(ff, char)
-	if not ff or not ff:IsA("ForceField") then return end
-	table.insert(ffConns, ff.Destroying:Connect(function() task.defer(doResetFromFF) end))
-	table.insert(ffConns, ff.AncestryChanged:Connect(function()
-		if not ff:IsDescendantOf(char) then task.defer(doResetFromFF) end
-	end))
-end
-
-local function hookForceField(char)
-	local existing = char:FindFirstChildOfClass("ForceField")
-	if existing then watchForceField(existing, char) end
-	table.insert(ffConns, char.ChildAdded:Connect(function(child)
-		if child:IsA("ForceField") then watchForceField(child, char) end
-	end))
-	table.insert(ffConns, char.ChildRemoved:Connect(function(child)
-		if child:IsA("ForceField") then task.defer(doResetFromFF) end
-	end))
-end
-
--- ========== FLING ==========
+-- ========== FLING (CFrame based) ==========
 local flingOn, flingConn, flingTarget = false, nil, nil
 
 local function hasNetOwner(part)
@@ -289,17 +421,29 @@ end
 local function getPlrRoot(plr)
 	local c = plr and plr.Character
 	if not c then return end
-	local h, r = c:FindFirstChildOfClass("Humanoid"), c:FindFirstChild("HumanoidRootPart")
+	local h = c:FindFirstChildOfClass("Humanoid")
+	local r = c:FindFirstChild("HumanoidRootPart")
 	if r and h and h.Health > 0 then return r end
 end
 
 local function applySeat(seat, targetRoot)
-	seat.AssemblyLinearVelocity = Vector3.new(10000, 10000, 0)
-	seat.CFrame = CFrame.new(targetRoot.Position) * CFrame.new(-2, 0, -12)
-	pcall(function() sethiddenproperty(seat, "PhysicsRepRootPart", targetRoot) end)
+	-- Pure CFrame fling (no AssemblyLinearVelocity)
+	local offset = CFrame.new(
+		math.random(-2, 2),
+		math.random(0, 2),
+		math.random(-2, 2)
+	)
+	seat.CFrame = CFrame.new(targetRoot.Position) * offset
+
 	pcall(function()
-		if InstanceHandle then sethiddenproperty(seat, "PhysicsRepRootRef", InstanceHandle.new(targetRoot)) end
+		sethiddenproperty(seat, "PhysicsRepRootPart", targetRoot)
 	end)
+	pcall(function()
+		if InstanceHandle then
+			sethiddenproperty(seat, "PhysicsRepRootRef", InstanceHandle.new(targetRoot))
+		end
+	end)
+
 	local model = seat.Parent and seat.Parent.Parent
 	if model then
 		local w = model:FindFirstChild("Wheels")
@@ -307,20 +451,29 @@ local function applySeat(seat, targetRoot)
 	end
 end
 
-local function stopFling()
+local function stopFlingLoop()
 	flingOn = false
-	if flingConn then flingConn:Disconnect() flingConn = nil end
+	flingActive = false
+	if flingConn then
+		flingConn:Disconnect()
+		flingConn = nil
+	end
 end
 
-local function startFling()
+local function startFlingLoop()
+	flingTarget = selectedFlingTarget
 	if not flingTarget or not flingTarget.Parent then
-		if window then
-			window:Notify({ title = "Lithium Battery", content = "Select a player first" })
-		end
+		notify("Select a player first")
 		return false
 	end
-	stopFling()
+	if flingOn then
+		stopFlingLoop()
+		notify("Fling OFF")
+		return false
+	end
+	stopFlingLoop()
 	flingOn = true
+	flingActive = true
 	flingConn = RunService.Heartbeat:Connect(function()
 		if not flingOn or not flingTarget then return end
 		local tRoot = getPlrRoot(flingTarget)
@@ -333,758 +486,539 @@ local function startFling()
 			end
 		end
 	end)
-	if window then
-		window:Notify({ title = "Lithium Battery", content = "Fling ON → " .. flingTarget.Name })
-	end
+	notify("Fling ON → " .. flingTarget.DisplayName)
 	return true
 end
 
--- ========== CUSTOM PLAYER LIST (Rayfield-style navy) ==========
-local NAVY = Color3.fromRGB(0, 0, 128)
-local NAVY_DARK = Color3.fromRGB(12, 12, 40)
-local NAVY_MID = Color3.fromRGB(28, 28, 70)
-local NAVY_LIGHT = Color3.fromRGB(50, 50, 120)
-local WHITE = Color3.fromRGB(230, 230, 240)
-local MUTED = Color3.fromRGB(160, 160, 180)
-local ACCENT = Color3.fromRGB(80, 100, 220)
+-- ========== ANTI-FLING ==========
+local antiConn, antiProps = nil, {}
 
-local playerListGui = nil
-local selectedRow = nil
-local selectedLabel = nil
-local playerRows = {}   -- [player] = { row, nameLbl, userLbl, teamBadge, avatar }
-local refreshConn = nil
-
-local function getTeamName(plr)
-	if plr.Team then return plr.Team.Name end
-	return "None"
-end
-
-local function getTeamColor(plr)
-	if plr.Team and plr.Team.TeamColor then
-		return plr.Team.TeamColor.Color
-	end
-	return MUTED
-end
-
-local function closePlayerList()
-	if refreshConn then refreshConn:Disconnect() refreshConn = nil end
-	table.clear(playerRows)
-	if playerListGui then
-		playerListGui:Destroy()
-		playerListGui = nil
-		selectedRow = nil
-	end
-end
-
-local function updateRow(plr, data)
-	if not (data and data.row and data.row.Parent) then return end
-	local teamName = getTeamName(plr)
-	if data.teamBadge then
-		data.teamBadge.Text = teamName
-		data.teamBadge.BackgroundColor3 = getTeamColor(plr)
-	end
-	if data.nameLbl and data.nameLbl.Text ~= plr.DisplayName then
-		data.nameLbl.Text = plr.DisplayName
-	end
-	if data.userLbl and data.userLbl.Text ~= ("@" .. plr.Name) then
-		data.userLbl.Text = "@" .. plr.Name
-	end
-	if data.avatar then
-		local newImg = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48", plr.UserId)
-		if data.avatar.Image ~= newImg then data.avatar.Image = newImg end
-	end
-	-- reflect current selection highlight
-	if flingTarget == plr and data.row.BackgroundColor3 ~= NAVY_LIGHT then
-		data.row.BackgroundColor3 = NAVY_LIGHT
-	elseif flingTarget ~= plr and data.row.BackgroundColor3 ~= NAVY_DARK then
-		data.row.BackgroundColor3 = NAVY_DARK
-	end
-end
-
-local function buildPlayerList()
-	closePlayerList()
-
-	local sg = Instance.new("ScreenGui")
-	sg.Name = "PlayerList"
-	sg.ResetOnSpawn = false
-	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	sg.DisplayOrder = 100
-	pcall(function()
-		if syn and syn.protect_gui then syn.protect_gui(sg) end
-		if gethui then sg.Parent = gethui() else sg.Parent = game:GetService("CoreGui") end
-	end)
-	if not sg.Parent then sg.Parent = player:WaitForChild("PlayerGui") end
-	playerListGui = sg
-
-	-- Main frame
-	local main = Instance.new("Frame")
-	main.Name = "Main"
-	main.Size = UDim2.new(0, 340, 0, 420)
-	main.Position = UDim2.new(0.5, -170, 0.5, -210)
-	main.BackgroundColor3 = NAVY_DARK
-	main.BorderSizePixel = 0
-	main.Parent = sg
-	Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = NAVY
-	stroke.Thickness = 1.5
-	stroke.Parent = main
-
-	-- Title bar
-	local titleBar = Instance.new("Frame")
-	titleBar.Size = UDim2.new(1, 0, 0, 42)
-	titleBar.BackgroundColor3 = NAVY
-	titleBar.BorderSizePixel = 0
-	titleBar.Parent = main
-	Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 10)
-	-- cover bottom corners of title
-	local titleCover = Instance.new("Frame")
-	titleCover.Size = UDim2.new(1, 0, 0, 12)
-	titleCover.Position = UDim2.new(0, 0, 1, -12)
-	titleCover.BackgroundColor3 = NAVY
-	titleCover.BorderSizePixel = 0
-	titleCover.Parent = titleBar
-
-	local title = Instance.new("TextLabel")
-	title.Size = UDim2.new(1, -50, 1, 0)
-	title.Position = UDim2.new(0, 14, 0, 0)
-	title.BackgroundTransparency = 1
-	title.Text = "Player List"
-	title.TextColor3 = WHITE
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 16
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.Parent = titleBar
-
-	local closeBtn = Instance.new("TextButton")
-	closeBtn.Size = UDim2.new(0, 32, 0, 32)
-	closeBtn.Position = UDim2.new(1, -38, 0, 5)
-	closeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 90)
-	closeBtn.Text = "×"
-	closeBtn.TextColor3 = WHITE
-	closeBtn.Font = Enum.Font.GothamBold
-	closeBtn.TextSize = 20
-	closeBtn.BorderSizePixel = 0
-	closeBtn.Parent = titleBar
-	Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
-	closeBtn.MouseButton1Click:Connect(closePlayerList)
-
-	-- Selected label
-	selectedLabel = Instance.new("TextLabel")
-	selectedLabel.Size = UDim2.new(1, -24, 0, 22)
-	selectedLabel.Position = UDim2.new(0, 12, 0, 48)
-	selectedLabel.BackgroundTransparency = 1
-	selectedLabel.Text = flingTarget and ("Selected: " .. flingTarget.DisplayName) or "Selected: none"
-	selectedLabel.TextColor3 = MUTED
-	selectedLabel.Font = Enum.Font.Gotham
-	selectedLabel.TextSize = 13
-	selectedLabel.TextXAlignment = Enum.TextXAlignment.Left
-	selectedLabel.Parent = main
-
-	-- Scroll frame
-	local scroll = Instance.new("ScrollingFrame")
-	scroll.Size = UDim2.new(1, -16, 1, -140)
-	scroll.Position = UDim2.new(0, 8, 0, 74)
-	scroll.BackgroundColor3 = NAVY_MID
-	scroll.BorderSizePixel = 0
-	scroll.ScrollBarThickness = 4
-	scroll.ScrollBarImageColor3 = ACCENT
-	scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	scroll.Parent = main
-	Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 8)
-
-	local listLayout = Instance.new("UIListLayout")
-	listLayout.SortOrder = Enum.SortOrder.Name
-	listLayout.Padding = UDim.new(0, 6)
-	listLayout.Parent = scroll
-
-	local listPad = Instance.new("UIPadding")
-	listPad.PaddingTop = UDim.new(0, 6)
-	listPad.PaddingBottom = UDim.new(0, 6)
-	listPad.PaddingLeft = UDim.new(0, 6)
-	listPad.PaddingRight = UDim.new(0, 6)
-	listPad.Parent = scroll
-
-	local function selectPlayer(plr, row)
-		flingTarget = plr
-		if selectedRow and selectedRow.Parent then
-			selectedRow.BackgroundColor3 = NAVY_DARK
-		end
-		selectedRow = row
-		row.BackgroundColor3 = NAVY_LIGHT
-		if selectedLabel then
-			selectedLabel.Text = "Selected: " .. plr.DisplayName
-			selectedLabel.TextColor3 = WHITE
-		end
-		if window then
-			window:Notify({ title = "Lithium Battery", content = "Selected: " .. plr.DisplayName })
-		end
-	end
-
-	for _, plr in ipairs(Players:GetPlayers()) do
-		if plr == player then continue end
-
-		local row = Instance.new("TextButton")
-		row.Name = plr.Name
-		row.Size = UDim2.new(1, -4, 0, 52)
-		row.BackgroundColor3 = (flingTarget == plr) and NAVY_LIGHT or NAVY_DARK
-		row.BorderSizePixel = 0
-		row.Text = ""
-		row.AutoButtonColor = false
-		row.Parent = scroll
-		Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
-
-		if flingTarget == plr then selectedRow = row end
-
-		-- Avatar
-		local avatar = Instance.new("ImageLabel")
-		avatar.Size = UDim2.new(0, 40, 0, 40)
-		avatar.Position = UDim2.new(0, 6, 0.5, -20)
-		avatar.BackgroundColor3 = NAVY_MID
-		avatar.BorderSizePixel = 0
-		avatar.Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48", plr.UserId)
-		avatar.Parent = row
-		Instance.new("UICorner", avatar).CornerRadius = UDim.new(1, 0)
-
-		-- Name
-		local nameLbl = Instance.new("TextLabel")
-		nameLbl.Size = UDim2.new(1, -100, 0, 20)
-		nameLbl.Position = UDim2.new(0, 54, 0, 8)
-		nameLbl.BackgroundTransparency = 1
-		nameLbl.Text = plr.DisplayName
-		nameLbl.TextColor3 = WHITE
-		nameLbl.Font = Enum.Font.GothamBold
-		nameLbl.TextSize = 14
-		nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-		nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-		nameLbl.Parent = row
-
-		-- Username (smaller)
-		local userLbl = Instance.new("TextLabel")
-		userLbl.Size = UDim2.new(1, -100, 0, 14)
-		userLbl.Position = UDim2.new(0, 54, 0, 28)
-		userLbl.BackgroundTransparency = 1
-		userLbl.Text = "@" .. plr.Name
-		userLbl.TextColor3 = MUTED
-		userLbl.Font = Enum.Font.Gotham
-		userLbl.TextSize = 11
-		userLbl.TextXAlignment = Enum.TextXAlignment.Left
-		userLbl.TextTruncate = Enum.TextTruncate.AtEnd
-		userLbl.Parent = row
-
-		-- Team badge
-		local teamName = getTeamName(plr)
-		local teamBadge = Instance.new("TextLabel")
-		teamBadge.Size = UDim2.new(0, 70, 0, 20)
-		teamBadge.Position = UDim2.new(1, -76, 0.5, -10)
-		teamBadge.BackgroundColor3 = getTeamColor(plr)
-		teamBadge.Text = teamName
-		teamBadge.TextColor3 = Color3.new(1, 1, 1)
-		teamBadge.Font = Enum.Font.GothamBold
-		teamBadge.TextSize = 10
-		teamBadge.BorderSizePixel = 0
-		teamBadge.Parent = row
-		Instance.new("UICorner", teamBadge).CornerRadius = UDim.new(0, 6)
-
-		row.MouseButton1Click:Connect(function()
-			selectPlayer(plr, row)
-		end)
-
-		playerRows[plr] = {
-			row = row,
-			nameLbl = nameLbl,
-			userLbl = userLbl,
-			teamBadge = teamBadge,
-			avatar = avatar,
-		}
-	end
-
-	-- Bottom buttons
-	local btnRow = Instance.new("Frame")
-	btnRow.Size = UDim2.new(1, -16, 0, 40)
-	btnRow.Position = UDim2.new(0, 8, 1, -50)
-	btnRow.BackgroundTransparency = 1
-	btnRow.Parent = main
-
-	local flingBtn = Instance.new("TextButton")
-	flingBtn.Size = UDim2.new(0.48, -4, 1, 0)
-	flingBtn.Position = UDim2.new(0, 0, 0, 0)
-	flingBtn.BackgroundColor3 = NAVY
-	flingBtn.Text = flingOn and "Stop Fling" or "Fling"
-	flingBtn.TextColor3 = WHITE
-	flingBtn.Font = Enum.Font.GothamBold
-	flingBtn.TextSize = 14
-	flingBtn.BorderSizePixel = 0
-	flingBtn.Parent = btnRow
-	Instance.new("UICorner", flingBtn).CornerRadius = UDim.new(0, 8)
-
-	flingBtn.MouseButton1Click:Connect(function()
-		if flingOn then
-			stopFling()
-			flingBtn.Text = "Fling"
-			if window then window:Notify({ title = "Lithium Battery", content = "Fling stopped" }) end
-		else
-			if startFling() then
-				flingBtn.Text = "Stop Fling"
-			end
-		end
-	end)
-
-	local refreshBtn = Instance.new("TextButton")
-	refreshBtn.Size = UDim2.new(0.48, -4, 1, 0)
-	refreshBtn.Position = UDim2.new(0.52, 4, 0, 0)
-	refreshBtn.BackgroundColor3 = NAVY_MID
-	refreshBtn.Text = "Refresh"
-	refreshBtn.TextColor3 = WHITE
-	refreshBtn.Font = Enum.Font.GothamBold
-	refreshBtn.TextSize = 14
-	refreshBtn.BorderSizePixel = 0
-	refreshBtn.Parent = btnRow
-	Instance.new("UICorner", refreshBtn).CornerRadius = UDim.new(0, 8)
-
-	refreshBtn.MouseButton1Click:Connect(function()
-		buildPlayerList()
-	end)
-
-	-- Drag title bar
-	local dragging, dragStart, startPos
-	titleBar.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = input.Position
-			startPos = main.Position
-		end
-	end)
-	titleBar.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = false
-		end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local delta = input.Position - dragStart
-			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-		end
-	end)
-
-	-- ===== AUTO REFRESH (live, no rebuild) =====
-	-- Runs on Heartbeat but throttled to avoid destroying/recreating GUI every frame.
-	-- It updates names, teams, avatars, and selection highlight in place.
-	local lastRefresh = 0
-	refreshConn = RunService.Heartbeat:Connect(function()
-		if not playerListGui or not playerListGui.Parent then
-			if refreshConn then refreshConn:Disconnect() refreshConn = nil end
-			return
-		end
-		local now = os.clock()
-		if now - lastRefresh < 0.1 then return end -- ~10 updates/sec, smooth & safe
-		lastRefresh = now
-
-		-- Update existing rows
-		for plr, data in pairs(playerRows) do
-			if not plr.Parent then
-				if data.row and data.row.Parent then data.row:Destroy() end
-				playerRows[plr] = nil
-			else
-				updateRow(plr, data)
-			end
-		end
-
-		-- Add new players that joined after the list opened
-		local listed = {}
-		for plr in pairs(playerRows) do listed[plr] = true end
-		for _, plr in ipairs(Players:GetPlayers()) do
-			if plr ~= player and not listed[plr] then
-				-- Rebuild the whole list once so the new player appears in the right slot
-				buildPlayerList()
-				return
-			end
-		end
-
-		-- Update "Selected" label if it was cleared by target leaving
-		if selectedLabel then
-			if flingTarget and flingTarget.Parent then
-				selectedLabel.Text = "Selected: " .. flingTarget.DisplayName
-				selectedLabel.TextColor3 = WHITE
-			else
-				selectedLabel.Text = "Selected: none"
-				selectedLabel.TextColor3 = MUTED
+local function startAntiFling()
+	if antiConn then return end
+	AntiFling = true
+	antiConn = RunService.Heartbeat:Connect(function()
+		local container = Workspace:FindFirstChild("CarContainer")
+		if not container then return end
+		for _, part in ipairs(container:GetDescendants()) do
+			if part:IsA("BasePart") then
+				if not antiProps[part] then
+					antiProps[part] = { CanCollide = part.CanCollide, CanTouch = part.CanTouch }
+				end
+				part.CanCollide = false
+				part.CanTouch = false
 			end
 		end
 	end)
 end
 
--- ========== ESP (from esp.txt) ==========
-local ESP = {}
-local espEnabled = false
-local espConn = nil
-local ESP_Camera = Workspace.CurrentCamera
-
-local function espGetTeamColor(Player)
-	if Player.Team then
-		return Player.Team.TeamColor.Color
+local function stopAntiFling()
+	AntiFling = false
+	if antiConn then antiConn:Disconnect() antiConn = nil end
+	for part, props in pairs(antiProps) do
+		if part and part.Parent then
+			part.CanCollide = props.CanCollide
+			part.CanTouch = props.CanTouch
+		end
 	end
-	return Color3.new(1, 1, 1)
+	table.clear(antiProps)
 end
 
-local function espIsVisible(Character)
-	local Head = Character:FindFirstChild("Head")
-	if not Head then return false end
-	local origin = ESP_Camera.CFrame.Position
-	local target = Head.Position
-	local direction = target - origin
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = {player.Character, Character}
-	params.IgnoreWater = true
-	local result = Workspace:Raycast(origin, direction, params)
-	if not result then
-		return true
+-- ========== FORCEFIELD ==========
+local ffConns = {}
+
+local function clearFf()
+	for _, c in ipairs(ffConns) do pcall(function() c:Disconnect() end) end
+	table.clear(ffConns)
+end
+
+local function hookFF(char)
+	clearFf()
+	local function onGone()
+		if FFReset then
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 then hum.Health = 0 end
+		end
 	end
-	return result.Instance:IsDescendantOf(Character)
+	local existing = char:FindFirstChildOfClass("ForceField")
+	if existing then table.insert(ffConns, existing.Destroying:Connect(onGone)) end
+	table.insert(ffConns, char.ChildAdded:Connect(function(c)
+		if c:IsA("ForceField") then table.insert(ffConns, c.Destroying:Connect(onGone)) end
+	end))
 end
 
-local function CreateESP(Player)
-	if Player == player then return end
-	if ESP[Player] then return end
-
-	local Outline = Instance.new("Highlight")
-	Outline.Name = "ESP_Outline"
-	Outline.FillTransparency = 1
-	Outline.OutlineTransparency = 0
-	Outline.OutlineColor = Color3.new(1, 1, 1)
-	Outline.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-	Outline.Enabled = false
-
-	local HealthBG = Drawing.new("Square")
-	HealthBG.Thickness = 1
-	HealthBG.Filled = true
-	HealthBG.Color = Color3.new(0, 0, 0)
-	HealthBG.Visible = false
-
-	local HealthBar = Drawing.new("Square")
-	HealthBar.Thickness = 1
-	HealthBar.Filled = true
-	HealthBar.Visible = false
-
-	local NameTag = Drawing.new("Text")
-	NameTag.Size = 14
-	NameTag.Center = true
-	NameTag.Outline = true
-	NameTag.OutlineColor = Color3.new(0, 0, 0)
-	NameTag.Visible = false
-
-	ESP[Player] = {
-		Outline = Outline,
-		HealthBG = HealthBG,
-		HealthBar = HealthBar,
-		NameTag = NameTag
-	}
-end
-
-local function RemoveESP(Player)
-	local data = ESP[Player]
-	if data then
-		if data.Outline then
-			data.Outline:Destroy()
-		end
-		data.HealthBG:Remove()
-		data.HealthBar:Remove()
-		data.NameTag:Remove()
-		ESP[Player] = nil
-	end
-end
-
-local function HideESP(data)
-	data.Outline.Enabled = false
-	data.HealthBG.Visible = false
-	data.HealthBar.Visible = false
-	data.NameTag.Visible = false
-end
-
-local function UpdateESP()
-	for Player, data in pairs(ESP) do
-		local Character = Player.Character
-		local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
-		local RootPart = Character and Character:FindFirstChild("HumanoidRootPart")
-		local Head = Character and Character:FindFirstChild("Head")
-
-		if not (Character and Humanoid and RootPart and Head) then
-			HideESP(data)
-			continue
-		end
-
-		if espIsVisible(Character) then
-			HideESP(data)
-			continue
-		end
-
-		if data.Outline.Parent ~= Character then
-			data.Outline.Parent = Character
-		end
-
-		local topPos, topOnScreen = ESP_Camera:WorldToViewportPoint(Head.Position + Vector3.new(0, 0.5, 0))
-		local bottomPos = ESP_Camera:WorldToViewportPoint(RootPart.Position - Vector3.new(0, 3, 0))
-
-		if not topOnScreen then
-			HideESP(data)
-			continue
-		end
-
-		local height = math.abs(topPos.Y - bottomPos.Y)
-		local width = height / 2
-		local boxX = topPos.X - width / 2
-		local boxY = topPos.Y
-		local color = espGetTeamColor(Player)
-
-		data.Outline.OutlineColor = color
-		data.Outline.Enabled = true
-
-		local healthPercent = math.clamp(Humanoid.Health / Humanoid.MaxHealth, 0, 1)
-		local barWidth = 4
-		local barHeight = height * healthPercent
-
-		data.HealthBG.Size = Vector2.new(barWidth, height)
-		data.HealthBG.Position = Vector2.new(boxX - barWidth - 3, boxY)
-		data.HealthBG.Visible = true
-
-		data.HealthBar.Size = Vector2.new(barWidth, barHeight)
-		data.HealthBar.Position = Vector2.new(boxX - barWidth - 3, boxY + (height - barHeight))
-		data.HealthBar.Color = Color3.fromRGB(
-			255 - (healthPercent * 255),
-			healthPercent * 255,
-			0
-		)
-		data.HealthBar.Visible = true
-
-		local distance = math.floor((RootPart.Position - ESP_Camera.CFrame.Position).Magnitude)
-		data.NameTag.Text = string.format("%s [%dm]", Player.Name, distance)
-		data.NameTag.Color = color
-		data.NameTag.Position = Vector2.new(topPos.X, boxY - 16)
-		data.NameTag.Visible = true
-	end
-end
-
+-- ========== ESP ==========
 local function startESP()
-	if espConn then return end
-	for _, p in ipairs(Players:GetPlayers()) do
-		CreateESP(p)
+	ESPEnabled = true
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= player and plr.Character then
+			local h = Instance.new("Highlight")
+			h.FillTransparency = 1
+			h.OutlineTransparency = 0
+			h.OutlineColor = plr.Team and plr.Team.TeamColor.Color or Color3.new(1, 1, 1)
+			h.Parent = plr.Character
+		end
 	end
-	espConn = RunService.RenderStepped:Connect(UpdateESP)
 end
 
 local function stopESP()
-	if espConn then
-		espConn:Disconnect()
-		espConn = nil
-	end
-	for Player, _ in pairs(ESP) do
-		RemoveESP(Player)
+	ESPEnabled = false
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr.Character then
+			for _, c in ipairs(plr.Character:GetChildren()) do
+				if c:IsA("Highlight") then c:Destroy() end
+			end
+		end
 	end
 end
 
-Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-	ESP_Camera = Workspace.CurrentCamera
-end)
+-- ========== SEPARATE PGui ==========
+local pgui = nil
+local pguiVisible = true
 
-Players.PlayerAdded:Connect(function(p)
-	if espEnabled then CreateESP(p) end
-end)
-
-Players.PlayerRemoving:Connect(function(p)
-	RemoveESP(p)
-end)
-
--- ========== RAYFIELD GEN2 ==========
-local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
-
-local window = Rayfield:CreateWindow({
-	name = "Lithium Battery",
-	subtitle = "By Zynn",
-	sidebarLayout = true,
-	theme = {
-		TabColor = Color3.fromRGB(200, 200, 220),
-		TabBackground = ColorSequence.new(Color3.fromRGB(0, 0, 128)),
-		TabStroke = ColorSequence.new(Color3.fromRGB(40, 40, 180)),
-		ElementStroke = Color3.fromRGB(0, 0, 128),
-		ActionColor = Color3.fromRGB(0, 0, 128),
-	},
-	configuration = {
-		autoSave = true,
-		autoLoad = true,
-		fileName = "LithiumBattery",
-	},
-})
-
--- ========== COMBAT TAB ==========
-local combatTab = window:CreateTab({ name = "Combat", icon = 93364949241311 })
-combatTab:CreateSection({ name = "Combat" })
-combatTab:CreateText({
-	name = "No combat features",
-	text = "Use Player / Extras tabs for Floor Tools and Fling.",
-})
-
--- ========== VISUAL TAB ==========
-local visualTab = window:CreateTab({ name = "Visual", icon = 84750991656135 })
-visualTab:CreateSection({ name = "ESP" })
-visualTab:CreateToggle({
-	name = "Enable ESP",
-	value = espEnabled,
-	callback = function(v)
-		espEnabled = v
-		if v then
-			startESP()
-			window:Notify({ title = "Lithium Battery", content = "ESP ON" })
-		else
-			stopESP()
-			window:Notify({ title = "Lithium Battery", content = "ESP OFF" })
-		end
-	end,
-})
-visualTab:CreateText({
-	name = "ESP info",
-	text = "Shows players through walls (Highlight + health bar + name/distance). Team-colored.",
-})
-
--- ========== PLAYER TAB (Floor Tools) ==========
-local playerTab = window:CreateTab({ name = "Player", icon = 100604009889706 })
-playerTab:CreateSection({ name = "Floor Tools" })
-playerTab:CreateButton({
-	name = "Under Floor",
-	callback = function()
-		toggleUnderFloor()
-	end,
-})
-playerTab:CreateButton({
-	name = "Above",
-	callback = function()
-		floorAbove()
-	end,
-})
-playerTab:CreateButton({
-	name = "Return to Original",
-	callback = function()
-		returnPos()
-	end,
-})
-
-playerTab:CreateSection({ name = "Keybinds" })
-playerTab:CreateKeybind({
-	name = "Under Floor Key",
-	value = binds.under ~= "None" and Enum.KeyCode[binds.under] or nil,
-	callback = function()
-		toggleUnderFloor()
-	end,
-	onChanged = function(key)
-		binds.under = key and key.Name or "None"
-		window:Notify({ title = "Lithium Battery", content = "Under Floor bound to " .. binds.under })
-	end,
-})
-playerTab:CreateKeybind({
-	name = "Above Key",
-	value = binds.above ~= "None" and Enum.KeyCode[binds.above] or nil,
-	callback = function()
-		floorAbove()
-	end,
-	onChanged = function(key)
-		binds.above = key and key.Name or "None"
-		window:Notify({ title = "Lithium Battery", content = "Above bound to " .. binds.above })
-	end,
-})
-playerTab:CreateKeybind({
-	name = "Return Key",
-	value = binds.ret ~= "None" and Enum.KeyCode[binds.ret] or nil,
-	callback = function()
-		returnPos()
-	end,
-	onChanged = function(key)
-		binds.ret = key and key.Name or "None"
-		window:Notify({ title = "Lithium Battery", content = "Return bound to " .. binds.ret })
-	end,
-})
-
--- ========== EXTRAS TAB ==========
-local extrasTab = window:CreateTab({ name = "Extras", icon = 85925158736685 })
-extrasTab:CreateSection({ name = "Team on Death" })
-extrasTab:CreateDropdown({
-	name = "Preferred Team",
-	options = { "Prisoner", "Guard" },
-	value = preferred == "guard" and "Guard" or "Prisoner",
-	callback = function(v)
-		preferred = tostring(v):lower():find("guard") and "guard" or "inmate"
-	end,
-})
-extrasTab:CreateToggle({
-	name = "On Death",
-	value = autoOnDeath,
-	callback = function(v)
-		autoOnDeath = v
-	end,
-})
-
-extrasTab:CreateSection({ name = "ForceField" })
-extrasTab:CreateToggle({
-	name = "Reset when ForceField wears off",
-	value = ffReset,
-	callback = function(v)
-		ffReset = v
-	end,
-})
-
-extrasTab:CreateSection({ name = "Owned Seat Fling" })
-extrasTab:CreateText({
-	name = "How to use",
-	text = "Open the player list, click a player (avatar + team shown), then press Fling.",
-})
-extrasTab:CreateButton({
-	name = "Open Player List",
-	callback = function()
-		buildPlayerList()
-	end,
-})
-extrasTab:CreateButton({
-	name = "Stop Fling",
-	callback = function()
-		stopFling()
-		window:Notify({ title = "Lithium Battery", content = "Fling stopped" })
-	end,
-})
-
--- Live updates for fling target leaving
-Players.PlayerRemoving:Connect(function(p)
-	if p == flingTarget then
-		flingTarget = nil
-		stopFling()
-		if selectedLabel then
-			selectedLabel.Text = "Selected: none"
-			selectedLabel.TextColor3 = MUTED
+local function destroyPGui()
+	if pgui then pcall(function() pgui:Destroy() end) pgui = nil end
+	for _, parent in ipairs({ CoreGui, player:FindFirstChild("PlayerGui") }) do
+		if parent then
+			local old = parent:FindFirstChild("LithiumPGui")
+			if old then old:Destroy() end
 		end
 	end
-end)
+	if gethui then
+		local old = gethui():FindFirstChild("LithiumPGui")
+		if old then old:Destroy() end
+	end
+end
 
--- ========== CHARACTER HOOKS ==========
-local function hook(char)
-	local hum = char:WaitForChild("Humanoid", 10)
-	if not hum then return end
-	hum.Died:Connect(function()
-		if not autoOnDeath then return end
-		deathToken += 1
-		local token = deathToken
-		lastDeathClock = os.clock()
-		task.delay(0.35, function()
-			if token == deathToken then runTeamSwitch(token) end
-		end)
+local function buildPGui()
+	destroyPGui()
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "LithiumPGui"
+	sg.ResetOnSpawn = false
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	protect(sg)
+	pgui = sg
+
+	local frame = Instance.new("Frame")
+	frame.Name = "Main"
+	frame.Size = UDim2.new(0, 360, 0, 420)
+	frame.Position = UDim2.new(0, 20, 0.5, -210)
+	frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	frame.BorderSizePixel = 0
+	frame.Active = true
+	frame.Draggable = true
+	frame.Parent = sg
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(255, 140, 0)
+	stroke.Thickness = 2
+	stroke.Parent = frame
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(1, -40, 0, 32)
+	title.Position = UDim2.new(0, 12, 0, 4)
+	title.BackgroundTransparency = 1
+	title.Text = "PGui  |  Player List"
+	title.TextColor3 = Color3.fromRGB(255, 255, 255)
+	title.Font = Enum.Font.Arial
+	title.TextSize = 16
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = frame
+
+	local selectedLabel = Instance.new("TextLabel")
+	selectedLabel.Size = UDim2.new(1, -20, 0, 18)
+	selectedLabel.Position = UDim2.new(0, 12, 0, 34)
+	selectedLabel.BackgroundTransparency = 1
+	selectedLabel.Text = "Selected: None"
+	selectedLabel.TextColor3 = Color3.fromRGB(255, 140, 0)
+	selectedLabel.Font = Enum.Font.Arial
+	selectedLabel.TextSize = 13
+	selectedLabel.TextXAlignment = Enum.TextXAlignment.Left
+	selectedLabel.Parent = frame
+
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.Size = UDim2.new(0, 28, 0, 28)
+	closeBtn.Position = UDim2.new(1, -32, 0, 4)
+	closeBtn.BackgroundTransparency = 1
+	closeBtn.Text = "X"
+	closeBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+	closeBtn.Font = Enum.Font.Arial
+	closeBtn.TextSize = 18
+	closeBtn.Parent = frame
+	closeBtn.MouseButton1Click:Connect(function()
+		frame.Visible = false
+		pguiVisible = false
 	end)
-	clearFfConns()
-	hookForceField(char)
+
+	local flingBtn = Instance.new("TextButton")
+	flingBtn.Size = UDim2.new(1, -20, 0, 32)
+	flingBtn.Position = UDim2.new(0, 10, 1, -42)
+	flingBtn.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
+	flingBtn.Text = "FLING TOGGLE (at selected)"
+	flingBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+	flingBtn.Font = Enum.Font.Arial
+	flingBtn.TextSize = 14
+	flingBtn.Parent = frame
+	Instance.new("UICorner", flingBtn).CornerRadius = UDim.new(0, 4)
+	flingBtn.MouseButton1Click:Connect(function()
+		startFlingLoop()
+	end)
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Size = UDim2.new(1, -16, 1, -96)
+	scroll.Position = UDim2.new(0, 8, 0, 54)
+	scroll.BackgroundTransparency = 1
+	scroll.ScrollBarThickness = 5
+	scroll.ScrollBarImageColor3 = Color3.fromRGB(255, 140, 0)
+	scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.Parent = frame
+
+	local list = Instance.new("UIListLayout")
+	list.Padding = UDim.new(0, 6)
+	list.Parent = scroll
+
+	local function makeBtn(parent, text, x, bg, fg, callback)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(0, 44, 0, 22)
+		b.Position = UDim2.new(1, x, 0.5, -11)
+		b.BackgroundColor3 = bg
+		b.Text = text
+		b.TextColor3 = fg
+		b.Font = Enum.Font.Arial
+		b.TextSize = 11
+		b.Parent = parent
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
+		b.MouseButton1Click:Connect(callback)
+		return b
+	end
+
+	local function addPlayerRow(plr)
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(1, 0, 0, 56)
+		row.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+		row.BorderSizePixel = 0
+		row.Parent = scroll
+		Instance.new("UIStroke", row).Color = Color3.fromRGB(55, 55, 55)
+
+		local avatar = Instance.new("ImageLabel")
+		avatar.Size = UDim2.new(0, 40, 0, 40)
+		avatar.Position = UDim2.new(0, 8, 0.5, -20)
+		avatar.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+		avatar.BorderSizePixel = 0
+		avatar.Parent = row
+		pcall(function()
+			avatar.Image = Players:GetUserThumbnailAsync(plr.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
+		end)
+
+		local nameL = Instance.new("TextLabel")
+		nameL.Size = UDim2.new(1, -200, 0, 20)
+		nameL.Position = UDim2.new(0, 56, 0, 6)
+		nameL.BackgroundTransparency = 1
+		nameL.Text = plr.DisplayName
+		nameL.TextColor3 = Color3.fromRGB(255, 255, 255)
+		nameL.Font = Enum.Font.Arial
+		nameL.TextSize = 14
+		nameL.TextXAlignment = Enum.TextXAlignment.Left
+		nameL.Parent = row
+
+		local teamL = Instance.new("TextLabel")
+		teamL.Size = UDim2.new(1, -200, 0, 16)
+		teamL.Position = UDim2.new(0, 56, 0, 28)
+		teamL.BackgroundTransparency = 1
+		teamL.Text = plr.Team and plr.Team.Name or "No Team"
+		teamL.TextColor3 = plr.Team and plr.Team.TeamColor.Color or Color3.fromRGB(150, 150, 150)
+		teamL.Font = Enum.Font.Arial
+		teamL.TextSize = 12
+		teamL.TextXAlignment = Enum.TextXAlignment.Left
+		teamL.Parent = row
+
+		makeBtn(row, "View", -150, Color3.fromRGB(255, 140, 0), Color3.fromRGB(0, 0, 0), function()
+			toggleView(plr)
+		end)
+		makeBtn(row, "TP", -100, Color3.fromRGB(255, 140, 0), Color3.fromRGB(0, 0, 0), function()
+			local root = getRoot()
+			local t = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+			if root and t then
+				root.CFrame = t.CFrame + Vector3.new(0, 3, 0)
+				notify("TP to " .. plr.DisplayName)
+			end
+		end)
+		makeBtn(row, "Select", -50, Color3.fromRGB(70, 70, 70), Color3.fromRGB(255, 255, 255), function()
+			selectedFlingTarget = plr
+			flingTarget = plr
+			selectedLabel.Text = "Selected: " .. plr.DisplayName
+			notify("Selected " .. plr.DisplayName)
+		end)
+	end
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= player then addPlayerRow(plr) end
+	end
+
+	Players.PlayerAdded:Connect(function(plr)
+		if plr ~= player and pgui and pgui.Parent then
+			task.wait(0.3)
+			if pgui and pgui.Parent then addPlayerRow(plr) end
+		end
+	end)
+
+	task.spawn(function()
+		while pgui and pgui.Parent do
+			task.wait(1)
+			if not (pgui and pgui.Parent) then break end
+			local scroll = pgui:FindFirstChild("Main") and pgui.Main:FindFirstChildOfClass("ScrollingFrame")
+			if not scroll then break end
+			for _, child in ipairs(scroll:GetChildren()) do
+				if child:IsA("Frame") then child:Destroy() end
+			end
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= player then addPlayerRow(plr) end
+			end
+		end
+	end)
+
+	pguiVisible = true
+	return sg
 end
 
-if player.Character then hook(player.Character) end
-player.CharacterAdded:Connect(function(char)
-	hook(char)
-	if underFloorOn then stopUnder(false) end
+local function togglePGui()
+	if pgui and pgui.Parent then
+		local frame = pgui:FindFirstChild("Main")
+		if frame then
+			pguiVisible = not frame.Visible
+			frame.Visible = pguiVisible
+			notify(pguiVisible and "PGui opened" or "PGui closed")
+			return
+		end
+	end
+	buildPGui()
+	notify("PGui opened")
+end
+
+-- ========== MAIN WINDOW ==========
+local Window = Library:CreateWindow({
+	Title = "Lithium Better  |  By zynn",
+	Center = true,
+	AutoShow = true,
+	TabPadding = 8,
+	MenuFadeTime = 0.2
+})
+
+Library.AccentColor = Color3.fromRGB(255, 140, 0)
+Library.AccentColorDark = Color3.fromRGB(200, 100, 0)
+Library:UpdateColorsUsingRegistry()
+
+local CombatTab   = Window:AddTab("Combat")
+local VisualsTab  = Window:AddTab("Visuals")
+local PlayerTab   = Window:AddTab("Player")
+local MiscTab     = Window:AddTab("Misc")
+local SettingsTab = Window:AddTab("Settings")
+
+-- Combat - Silent Aim
+local SilentBox = CombatTab:AddLeftGroupbox("Silent Aim")
+
+SilentBox:AddToggle("SilentAimEnabled", {
+	Text = "Enabled", Default = false,
+	Callback = function(v)
+		SilentAim.Enabled = v
+		notify("Silent Aim " .. (v and "ON" or "OFF"))
+	end
+}):AddKeyPicker("SilentAimKey", { Default = "None", Text = "Silent Aim Key", Mode = "Toggle", SyncToggleState = true })
+
+SilentBox:AddDropdown("HitPart", {
+	Text = "Hit Part",
+	Values = {"Head", "Torso", "HumanoidRootPart"},
+	Default = 1,
+	Callback = function(v) SilentAim.HitPart = v end
+})
+
+SilentBox:AddSlider("Range", {
+	Text = "Range", Min = 50, Max = 1000, Default = 500, Rounding = 0,
+	Callback = function(v) SilentAim.Range = v end
+})
+
+SilentBox:AddSlider("HitChance", {
+	Text = "Hit Chance %", Min = 1, Max = 100, Default = 100, Rounding = 0,
+	Callback = function(v) SilentAim.HitChance = v end
+})
+
+SilentBox:AddSlider("FOVSize", {
+	Text = "FOV Size", Min = 30, Max = 400, Default = 120, Rounding = 0,
+	Callback = function(v) SilentAim.FOV = v end
+})
+
+SilentBox:AddToggle("TeamCheck", {
+	Text = "Team Check", Default = true,
+	Callback = function(v) SilentAim.TeamCheck = v end
+})
+
+-- Combat - Fire Rate
+local FireRateBox = CombatTab:AddRightGroupbox("Fire Rate")
+
+FireRateBox:AddToggle("FireRateEnabled", {
+	Text = "Enable Fire Rate", Default = false,
+	Callback = function(v)
+		SetFireRateEnabled(v)
+		notify("Fire Rate " .. (v and ("ON (" .. DesiredFireRate .. ")") or "OFF"))
+	end
+}):AddKeyPicker("FireRateKey", { Default = "None", Text = "Fire Rate Key", Mode = "Toggle", SyncToggleState = true })
+
+FireRateBox:AddSlider("FireRateValue", {
+	Text = "Fire Rate Value", Min = 0.02, Max = 0.15, Default = 0.05, Rounding = 2,
+	Callback = function(v) SetFireRateValue(v) end
+})
+
+FireRateBox:AddToggle("ForceAutoFire", {
+	Text = "Force Auto Fire", Default = true,
+	Callback = function(v)
+		SetForceAutoFire(v)
+		notify("Force Auto Fire " .. (v and "ON" or "OFF"))
+	end
+})
+
+FireRateBox:AddLabel("Lower = faster | Recommended 0.04-0.07")
+FireRateBox:AddLabel("Re-equip gun after enabling")
+
+-- Visuals
+local ESPBox = VisualsTab:AddLeftGroupbox("ESP")
+ESPBox:AddToggle("ESPEnabled", {
+	Text = "Enabled", Default = false,
+	Callback = function(v)
+		if v then startESP() else stopESP() end
+		notify("ESP " .. (v and "ON" or "OFF"))
+	end
+}):AddKeyPicker("ESPKey", { Default = "None", Text = "ESP Key", Mode = "Toggle", SyncToggleState = true })
+
+local FOVBox = VisualsTab:AddRightGroupbox("FOV Circle")
+FOVBox:AddToggle("ShowFOV", {
+	Text = "Show FOV Circle", Default = false,
+	Callback = function(v)
+		SilentAim.ShowFOV = v
+		notify("FOV Circle " .. (v and "ON" or "OFF"))
+	end
+}):AddKeyPicker("FOVKey", { Default = "None", Text = "FOV Key", Mode = "Toggle", SyncToggleState = true })
+
+FOVBox:AddLabel("Orange = no target")
+FOVBox:AddLabel("Green = target locked")
+
+-- Player
+local FloorBox = PlayerTab:AddLeftGroupbox("Floor Tools")
+
+FloorBox:AddToggle("UnderFloor", {
+	Text = "Under Floor", Default = false,
+	Callback = function(v)
+		if v then if not underFloorOn then toggleUnderFloor() end
+		else if underFloorOn then stopAllFloor() restoreYOnly() notify("Under Floor OFF") end end
+	end
+}):AddKeyPicker("UnderKey", { Default = "None", Text = "Under Key", Mode = "Toggle", SyncToggleState = true })
+
+FloorBox:AddSlider("UnderDepth", {
+	Text = "Under Depth (studs)", Min = 1, Max = 60, Default = 7, Rounding = 0,
+	Callback = function(v) underOffset = v end
+})
+
+FloorBox:AddToggle("AboveFloor", {
+	Text = "Above Floor", Default = false,
+	Callback = function(v)
+		if v then if not aboveOn then floorAbove() end
+		else if aboveOn then stopAllFloor() restoreYOnly() notify("Above Floor OFF") end end
+	end
+}):AddKeyPicker("AboveKey", { Default = "None", Text = "Above Key", Mode = "Toggle", SyncToggleState = true })
+
+FloorBox:AddSlider("AboveHeight", {
+	Text = "Above Height (studs)", Min = 1, Max = 60, Default = 7, Rounding = 0,
+	Callback = function(v) aboveOffset = v end
+})
+
+FloorBox:AddToggle("ReturnPos", {
+	Text = "Return to Original", Default = false,
+	Callback = function(v)
+		if v then
+			returnPos()
+			task.defer(function() if Toggles.ReturnPos then Toggles.ReturnPos:SetValue(false) end end)
+		end
+	end
+}):AddKeyPicker("ReturnKey", { Default = "None", Text = "Return Key", Mode = "Toggle", SyncToggleState = true })
+
+local UtilityBox = PlayerTab:AddRightGroupbox("Utility")
+
+UtilityBox:AddToggle("AntiFling", {
+	Text = "Anti-Fling", Default = false,
+	Callback = function(v)
+		if v then startAntiFling() else stopAntiFling() end
+		notify("Anti-Fling " .. (v and "ON" or "OFF"))
+	end
+}):AddKeyPicker("AntiFlingKey", { Default = "None", Text = "Anti-Fling Key", Mode = "Toggle", SyncToggleState = true })
+
+UtilityBox:AddToggle("FFReset", {
+	Text = "ForceField Reset", Default = false,
+	Callback = function(v)
+		FFReset = v
+		notify("F Reset " .. (v and "ON" or "OFF"))
+	end
+}):AddKeyPicker("FFResetKey", { Default = "None", Text = "F Reset Key", Mode = "Toggle", SyncToggleState = true })
+
+UtilityBox:AddToggle("TeamChange", {
+	Text = "Team Change", Default = false,
+	Callback = function(v)
+		if v then
+			notify("Team Change pressed")
+			task.defer(function() if Toggles.TeamChange then Toggles.TeamChange:SetValue(false) end end)
+		end
+	end
+}):AddKeyPicker("TeamKey", { Default = "None", Text = "Team Key", Mode = "Toggle", SyncToggleState = true })
+
+-- Misc
+local MiscBox = MiscTab:AddLeftGroupbox("PGui")
+MiscBox:AddLabel("PGui is a separate window")
+MiscBox:AddLabel("Opens on load")
+MiscBox:AddLabel("F1 = open / close PGui")
+MiscBox:AddLabel(" ")
+MiscBox:AddLabel("View again = stop viewing")
+MiscBox:AddLabel("Fling = CFrame based")
+
+-- Settings
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({})
+ThemeManager:SetFolder("LithiumBetter")
+SaveManager:SetFolder("LithiumBetter/configs")
+SaveManager:BuildConfigSection(SettingsTab)
+ThemeManager:ApplyToTab(SettingsTab)
+
+-- Open PGui on load
+task.defer(function()
+	task.wait(0.4)
+	buildPGui()
 end)
 
-window:Notify({ title = "Lithium Battery", content = "Loaded with Rayfield Gen2" })
-print("Lithium Battery - Rayfield Gen2")
+UserInputService.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if input.KeyCode == Enum.KeyCode.F1 then
+		togglePGui()
+	end
+end)
+
+Library:OnUnload(function()
+	stopAllFloor()
+	stopAntiFling()
+	stopESP()
+	stopFlingLoop()
+	stopView()
+	SetFireRateEnabled(false)
+	if FOVCircle then pcall(function() FOVCircle:Remove() end) end
+	destroyPGui()
+	print("Lithium Better unloaded")
+end)
+
+if player.Character then hookFF(player.Character) end
+player.CharacterAdded:Connect(function(char)
+	hookFF(char)
+	stopAllFloor()
+	stopView()
+	if Toggles.UnderFloor then Toggles.UnderFloor:SetValue(false) end
+	if Toggles.AboveFloor then Toggles.AboveFloor:SetValue(false) end
+end)
+
+Library:Notify("Loaded | Silent Aim (ShootEvent) + CFrame Fling + Fire Rate | F1 = PGui", 5)
